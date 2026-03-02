@@ -113,8 +113,8 @@ def display_label(bbg: str, name: str, max_len: int = 15) -> str:
 
 
 # ── Excel parsing ──────────────────────────────────────────────────────────────
-def parse_excel(file_obj) -> pd.DataFrame:
-    df_raw = pd.read_excel(file_obj, sheet_name="Current DR80", header=None)
+def _parse_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Parse a DR80-structured sheet (sector headers + ticker rows) into a DataFrame."""
     records = []
     current_sector = "Unknown"
     for _, row in df_raw.iterrows():
@@ -141,6 +141,43 @@ def parse_excel(file_obj) -> pd.DataFrame:
             **perf,
         })
     return pd.DataFrame(records)
+
+
+def parse_excel(file_obj) -> pd.DataFrame:
+    df_raw = pd.read_excel(file_obj, sheet_name="Current DR80", header=None)
+    return _parse_sheet(df_raw)
+
+
+def parse_competitors(file_bytes: bytes) -> pd.DataFrame:
+    """Parse the 'Competitors' sheet if it exists, else return empty DataFrame."""
+    try:
+        xl = pd.ExcelFile(io.BytesIO(file_bytes))
+        if "Competitors" not in xl.sheet_names:
+            return pd.DataFrame()
+        df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Competitors", header=None)
+        df = _parse_sheet(df_raw)
+        df["Is_DR80"] = False   # competitors are never DR80
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def match_competitor_to_dr80(comp_bbg: str, comp_sector: str, dr80_df: pd.DataFrame) -> str | None:
+    """
+    Match a competitor to a DR80 security.
+    1. Try exact base-code match (e.g. 'NVDA' in comp matches 'NVDA80 TB Equity' in DR80)
+    2. Fall back to sector match — return sector label
+    """
+    comp_code = short_ticker(comp_bbg).upper()
+    # Remove trailing digits/suffix variants
+    for row in dr80_df[dr80_df["Is_DR80"]].itertuples():
+        dr_code = short_ticker(row.BBG_Ticker).upper()
+        # Strip "80" from DR80 ticker for comparison
+        dr_base = dr_code.replace("80", "")
+        if comp_code == dr_base or comp_code == dr_code:
+            return row.BBG_Ticker
+    # No exact match — return sector as the group key
+    return comp_sector
 
 
 # ── Yahoo Finance fetch ────────────────────────────────────────────────────────
@@ -283,7 +320,8 @@ def bar_colors(vals):
 
 # ── Session state ──────────────────────────────────────────────────────────────
 for key, default in [("df", None), ("excel_bytes", None),
-                     ("last_refresh", None), ("source_label", None)]:
+                     ("last_refresh", None), ("source_label", None),
+                     ("competitors_df", None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -293,6 +331,7 @@ if st.session_state.df is None and os.path.exists(DEFAULT_FILE):
         b = f.read()
     st.session_state.excel_bytes = b
     st.session_state.df = parse_excel(io.BytesIO(b))
+    st.session_state.competitors_df = parse_competitors(b)
     st.session_state.source_label = DEFAULT_FILE
 
 
@@ -309,9 +348,14 @@ with st.sidebar:
         b = uploaded.read()
         st.session_state.excel_bytes = b
         st.session_state.df = parse_excel(io.BytesIO(b))
+        st.session_state.competitors_df = parse_competitors(b)
         st.session_state.source_label = uploaded.name
         st.session_state.last_refresh = None
-        st.success(f"✓ Loaded {uploaded.name}")
+        comp_count = len(st.session_state.competitors_df)
+        msg = f"✓ Loaded {uploaded.name}"
+        if comp_count:
+            msg += f" · {comp_count} competitors"
+        st.success(msg)
 
     if st.session_state.source_label:
         st.caption(f"Source: {st.session_state.source_label}")
@@ -407,8 +451,9 @@ if search:
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab_dash, tab_pipeline, tab_add = st.tabs(["📊  Dashboard", "🔭  Pipeline", "➕  Add Security"])
-
+tab_dash, tab_sector, tab_pipeline, tab_competitors, tab_add = st.tabs([
+    "📊  Dashboard", "🔬  Sector Analysis", "🔭  Pipeline", "⚔️  Competitors", "➕  Add Security"
+])
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — DASHBOARD
@@ -420,16 +465,13 @@ with tab_dash:
         st.markdown('<div class="dashboard-sub">KTB SECURITIES · DEPOSITARY RECEIPT OPERATIONS</div>', unsafe_allow_html=True)
     with ci:
         st.markdown(f'<div style="text-align:right;font-family:IBM Plex Mono;font-size:0.65rem;color:#334155;margin-top:8px;">SHOWING {len(filt)} / {len(df_all)}<br>PERIOD: <span style="color:#3b82f6">{period}</span></div>', unsafe_allow_html=True)
-
     st.markdown("---")
 
-    # KPIs
     pv = filt[period].dropna()
-    pos_n = int((pv >= 0).sum())
-    neg_n = int((pv < 0).sum())
+    pos_n = int((pv >= 0).sum()); neg_n = int((pv < 0).sum())
     avg_r = float(pv.mean()) if len(pv) else 0.0
     hit_r = pos_n / len(pv) * 100 if len(pv) else 0.0
-    best = filt.loc[filt[period].idxmax()] if len(pv) else None
+    best  = filt.loc[filt[period].idxmax()] if len(pv) else None
     worst = filt.loc[filt[period].idxmin()] if len(pv) else None
 
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -438,70 +480,51 @@ with tab_dash:
         <div class="metric-value">{len(filt)}</div>
         <div class="metric-sub">DR80: {filt['Is_DR80'].sum()} · Pipeline: {(~filt['Is_DR80']).sum()}</div></div>""", unsafe_allow_html=True)
     with k2:
-        cc = "green" if avg_r >= 0 else "red"
         vc = C["pos"] if avg_r >= 0 else C["neg"]
-        st.markdown(f"""<div class="metric-card {cc}"><div class="metric-label">Avg Return ({period})</div>
+        st.markdown(f"""<div class="metric-card {'green' if avg_r>=0 else 'red'}"><div class="metric-label">Avg Return ({period})</div>
         <div class="metric-value" style="color:{vc}">{fmt_pct(avg_r)}</div>
         <div class="metric-sub">{pos_n} pos · {neg_n} neg</div></div>""", unsafe_allow_html=True)
     with k3:
-        bv = best[period] if best is not None else None
         bt = display_label(best["BBG_Ticker"], best["Name"]) if best is not None else "—"
         st.markdown(f"""<div class="metric-card green"><div class="metric-label">Best ({period})</div>
-        <div class="metric-value" style="color:#10b981">{fmt_pct(bv)}</div>
+        <div class="metric-value" style="color:#10b981">{fmt_pct(best[period] if best is not None else None)}</div>
         <div class="metric-sub">{bt}</div></div>""", unsafe_allow_html=True)
     with k4:
-        wv = worst[period] if worst is not None else None
         wt = display_label(worst["BBG_Ticker"], worst["Name"]) if worst is not None else "—"
         st.markdown(f"""<div class="metric-card red"><div class="metric-label">Worst ({period})</div>
-        <div class="metric-value" style="color:#ef4444">{fmt_pct(wv)}</div>
+        <div class="metric-value" style="color:#ef4444">{fmt_pct(worst[period] if worst is not None else None)}</div>
         <div class="metric-sub">{wt}</div></div>""", unsafe_allow_html=True)
     with k5:
         st.markdown(f"""<div class="metric-card"><div class="metric-label">Win Rate</div>
         <div class="metric-value">{hit_r:.0f}%</div>
         <div class="metric-sub">+ve return for {period}</div></div>""", unsafe_allow_html=True)
 
-    # Charts row 1
     st.markdown('<div class="section-header">PERFORMANCE</div>', unsafe_allow_html=True)
     ca, cb = st.columns([3, 2])
 
     with ca:
-        pdf = filt[["BBG_Ticker", "Name", period]].dropna(subset=[period]).copy()
-        pdf["S"] = pdf.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1)
-        # Deduplicate labels by appending sector if collision
-        seen = {}
-        deduped = []
+        pdf = filt[["BBG_Ticker","Name",period]].dropna(subset=[period]).copy()
+        pdf["S"] = pdf.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+        seen = {}; deduped = []
         for lbl in pdf["S"]:
-            if lbl in seen:
-                seen[lbl] += 1
-                deduped.append(f"{lbl} ({seen[lbl]})")
-            else:
-                seen[lbl] = 0
-                deduped.append(lbl)
+            if lbl in seen: seen[lbl]+=1; deduped.append(f"{lbl} ({seen[lbl]})")
+            else: seen[lbl]=0; deduped.append(lbl)
         pdf["S"] = deduped
-        pdf["S"] = pdf["S"].astype(str)  # force string — prevents Plotly treating numeric codes as numbers
         pdf = pdf.sort_values(period, ascending=False)
-        half = min(15, len(pdf) // 2)
+        half = min(15, len(pdf)//2)
         bar_df = pd.concat([pdf.head(half), pdf.tail(half)]).drop_duplicates().sort_values(period)
-        n_bars = len(bar_df)
-        bar_h = max(320, n_bars * 28 + 60)
+        bar_h = max(320, len(bar_df)*28+60)
         fig = go.Figure(go.Bar(
-            x=bar_df[period],
-            y=bar_df["S"].astype(str),
-            orientation="h",
+            x=bar_df[period], y=bar_df["S"].astype(str), orientation="h",
             marker_color=bar_colors(bar_df[period]), marker_line_width=0,
-            text=[f"{v:+.1f}%" for v in bar_df[period]],
-            textposition="outside",
+            text=[f"{v:+.1f}%" for v in bar_df[period]], textposition="outside",
             textfont=dict(family=C["font"], size=10, color=C["text"]),
             hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
         ))
         fig.add_vline(x=0, line_color="#334155", line_width=1)
-        fig.update_layout(
-            title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-            **base_layout(bar_h),
-            xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%",
-                       tickfont=dict(size=11)),
-            yaxis=dict(showgrid=False, tickfont=dict(size=11), type="category"),
-        )
+        fig.update_layout(title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                          **base_layout(bar_h), xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                          yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
         st.plotly_chart(fig, use_container_width=True)
 
     with cb:
@@ -510,18 +533,16 @@ with tab_dash:
             x=sp.values, y=sp.index, orientation="h",
             marker_color=bar_colors(sp.values), marker_line_width=0,
             text=[f"{v:+.1f}%" for v in sp.values], textposition="outside",
-            textfont=dict(family=C["font"], size=11, color=C["text"]),
+            textfont=dict(family=C["font"],size=11,color=C["text"]),
             hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
         ))
         fig2.add_vline(x=0, line_color="#334155", line_width=1)
-        fig2.update_layout(title=dict(text=f"Avg by Sector — {period}", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                           **base_layout(420, margin=dict(l=10, r=80, t=44, b=10)),
-                           xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%",
-                                      tickfont=dict(size=11)),
-                           yaxis=dict(showgrid=False, tickfont=dict(size=11)))
+        fig2.update_layout(title=dict(text=f"Avg by Sector — {period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                           **base_layout(420,margin=dict(l=10,r=80,t=44,b=10)),
+                           xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                           yaxis=dict(showgrid=False,tickfont=dict(size=11)))
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Charts row 2
     st.markdown('<div class="section-header">DISTRIBUTION & HEATMAPS</div>', unsafe_allow_html=True)
     cc1, cc2 = st.columns([2, 3])
 
@@ -533,153 +554,74 @@ with tab_dash:
         if len(hv):
             fig3.add_vline(x=float(hv.mean()), line_color="#f59e0b", line_width=1, line_dash="dot",
                            annotation_text=f"avg {hv.mean():+.1f}%",
-                           annotation_font=dict(color="#f59e0b", size=10, family=C["font"]))
-        fig3.update_layout(title=dict(text=f"Distribution — {period}", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                           **base_layout(340), xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%",
-                                                           tickfont=dict(size=11)),
-                           yaxis=dict(showgrid=True, gridcolor=C["grid"], tickfont=dict(size=11)))
+                           annotation_font=dict(color="#f59e0b",size=10,family=C["font"]))
+        fig3.update_layout(title=dict(text=f"Distribution — {period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                           **base_layout(340),xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                           yaxis=dict(showgrid=True,gridcolor=C["grid"],tickfont=dict(size=11)))
         st.plotly_chart(fig3, use_container_width=True)
 
     with cc2:
-        # Security-level heatmap — bigger, better font, clearer colorbar
-        hdf = filt[["BBG_Ticker", "Name"] + PERIODS].copy()
-        hdf["S"] = hdf.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+        hdf = filt[["BBG_Ticker","Name"]+PERIODS].copy()
+        hdf["S"] = hdf.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
         hdf["abs_ytd"] = hdf["YTD"].abs()
-        hdf = hdf.dropna(subset=["YTD"]).nlargest(20, "abs_ytd")
+        hdf = hdf.dropna(subset=["YTD"]).nlargest(20,"abs_ytd")
         z = hdf[PERIODS].values
-        n_rows = len(hdf)
-        heat_h = max(380, n_rows * 26 + 60)
-
-        # Build text with proper nan handling
-        text_vals = []
-        for row_z in z:
-            row_t = []
-            for v in row_z:
-                if v is None or (isinstance(v, float) and np.isnan(v)):
-                    row_t.append("—")
-                else:
-                    row_t.append(f"{v:+.0f}%")
-            text_vals.append(row_t)
-
+        heat_h = max(380, len(hdf)*26+60)
+        text_vals = [[f"{v:+.0f}%" if not (v is None or np.isnan(v)) else "—" for v in row] for row in z]
         fig4 = go.Figure(go.Heatmap(
             z=z, x=PERIODS, y=hdf["S"].tolist(),
-            colorscale=[
-                [0.0, "#991b1b"],   # deep red  (very negative)
-                [0.3, "#7f1d1d"],
-                [0.5, "#0f172a"],   # near-black (zero)
-                [0.7, "#064e3b"],
-                [1.0, "#059669"],   # bright green (very positive)
-            ],
-            zmid=0,
-            text=text_vals,
-            texttemplate="%{text}",
-            textfont=dict(family=C["font"], size=10, color="#e2e8f0"),
+            colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+            zmid=0, text=text_vals, texttemplate="%{text}",
+            textfont=dict(family=C["font"],size=10,color="#e2e8f0"),
             hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-            colorbar=dict(
-                title=dict(text="Return %", font=dict(family=C["font"], size=10, color="#64748b")),
-                tickfont=dict(family=C["font"], size=10, color="#94a3b8"),
-                ticksuffix="%",
-                thickness=14,
-                len=0.9,
-                tickvals=[-100, -50, 0, 50, 100],
-            ),
+            colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")),
+                          tickfont=dict(family=C["font"],size=10,color="#94a3b8"),
+                          ticksuffix="%",thickness=14,len=0.9,tickvals=[-100,-50,0,50,100]),
         ))
-        fig4.update_layout(
-            title=dict(text="Multi-Period Heatmap — Top 20 by |YTD|", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-            **base_layout(heat_h, margin=dict(l=10, r=80, t=44, b=10)),
-            xaxis=dict(showgrid=False, tickfont=dict(size=12, color="#94a3b8"), side="bottom"),
-            yaxis=dict(showgrid=False, autorange="reversed", tickfont=dict(size=11, color="#e2e8f0")),
-        )
+        fig4.update_layout(title=dict(text="Multi-Period Heatmap — Top 20 by |YTD|",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                           **base_layout(heat_h,margin=dict(l=10,r=80,t=44,b=10)),
+                           xaxis=dict(showgrid=False,tickfont=dict(size=12,color="#94a3b8"),side="bottom"),
+                           yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11,color="#e2e8f0")))
         st.plotly_chart(fig4, use_container_width=True)
 
-    # ── Sector Heatmap ─────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">SECTOR HEATMAP — AVG & MEDIAN RETURNS</div>', unsafe_allow_html=True)
-
-    sector_rows_avg = []
-    sector_rows_med = []
-    sector_labels = []
-
+    z_sec=[]; y_sec=[]
     for sec in sorted(filt["Sector"].unique()):
-        sec_data = filt[filt["Sector"] == sec]
-        avgs = [sec_data[p].mean() if sec_data[p].notna().sum() > 0 else np.nan for p in PERIODS]
-        meds = [sec_data[p].median() if sec_data[p].notna().sum() > 0 else np.nan for p in PERIODS]
-        sector_rows_avg.append(avgs)
-        sector_rows_med.append(meds)
-        sector_labels.append(sec)
-
-    # Interleave: for each sector, show avg row then median row
-    z_sec = []
-    y_sec = []
-    for i, sec in enumerate(sector_labels):
-        z_sec.append(sector_rows_avg[i])
-        y_sec.append(f"{sec}  avg")
-        z_sec.append(sector_rows_med[i])
-        y_sec.append(f"{sec}  med")
-
+        sd = filt[filt["Sector"]==sec]
+        z_sec.append([sd[p].mean() if sd[p].notna().sum()>0 else np.nan for p in PERIODS]); y_sec.append(f"{sec}  avg")
+        z_sec.append([sd[p].median() if sd[p].notna().sum()>0 else np.nan for p in PERIODS]); y_sec.append(f"{sec}  med")
     z_sec_arr = np.array(z_sec, dtype=float)
-    sec_h = max(300, len(y_sec) * 22 + 60)
-
-    text_sec = []
-    for row_z in z_sec_arr:
-        row_t = []
-        for v in row_z:
-            if np.isnan(v):
-                row_t.append("—")
-            else:
-                row_t.append(f"{v:+.0f}%")
-        text_sec.append(row_t)
-
-    fig_sec_heat = go.Figure(go.Heatmap(
+    sec_h = max(300, len(y_sec)*22+60)
+    text_sec = [[f"{v:+.0f}%" if not np.isnan(v) else "—" for v in row] for row in z_sec_arr]
+    fig_sh2 = go.Figure(go.Heatmap(
         z=z_sec_arr, x=PERIODS, y=y_sec,
-        colorscale=[
-            [0.0, "#991b1b"],
-            [0.3, "#7f1d1d"],
-            [0.5, "#0f172a"],
-            [0.7, "#064e3b"],
-            [1.0, "#059669"],
-        ],
-        zmid=0,
-        text=text_sec,
-        texttemplate="%{text}",
-        textfont=dict(family=C["font"], size=11, color="#e2e8f0"),
+        colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+        zmid=0, text=text_sec, texttemplate="%{text}",
+        textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
         hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-        colorbar=dict(
-            title=dict(text="Return %", font=dict(family=C["font"], size=10, color="#64748b")),
-            tickfont=dict(family=C["font"], size=10, color="#94a3b8"),
-            ticksuffix="%", thickness=14, len=0.9,
-            tickvals=[-50, -25, 0, 25, 50],
-        ),
+        colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")),
+                      tickfont=dict(family=C["font"],size=10,color="#94a3b8"),
+                      ticksuffix="%",thickness=14,len=0.9,tickvals=[-50,-25,0,25,50]),
     ))
-    fig_sec_heat.update_layout(
-        title=dict(text="Sector Returns by Period (Avg & Median)", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-        **base_layout(sec_h, margin=dict(l=10, r=80, t=44, b=10)),
-        xaxis=dict(showgrid=False, tickfont=dict(size=12, color="#94a3b8")),
-        yaxis=dict(showgrid=False, autorange="reversed", tickfont=dict(size=11, color="#e2e8f0")),
-    )
-    st.plotly_chart(fig_sec_heat, use_container_width=True)
+    fig_sh2.update_layout(title=dict(text="Sector Returns by Period (Avg & Median)",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                          **base_layout(sec_h,margin=dict(l=10,r=80,t=44,b=10)),
+                          xaxis=dict(showgrid=False,tickfont=dict(size=12,color="#94a3b8")),
+                          yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11,color="#e2e8f0")))
+    st.plotly_chart(fig_sh2, use_container_width=True)
 
-    # Table
     st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
-    sc1, sc2 = st.columns([2, 1])
-    with sc1:
-        sort_by = st.selectbox("Sort by", ["Name", "Sector"] + PERIODS, index=2, label_visibility="collapsed")
-    with sc2:
-        asc = st.checkbox("Ascending", value=False)
-
-    tbl = filt[["BBG_Ticker", "Name", "Sector", "Is_DR80", "Quarter"] + PERIODS].copy()
-    tbl["Ticker"] = tbl.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
-    tbl["Type"] = tbl["Is_DR80"].map({True: "DR80", False: "Pipeline"})
-    tbl = tbl.drop(columns=["BBG_Ticker", "Is_DR80"]).rename(columns={"Quarter": "Q"})
-    tbl = tbl[["Ticker", "Name", "Sector", "Type", "Q"] + PERIODS]
-    tbl = tbl.sort_values(sort_by, ascending=asc, na_position="last")
-
-    styled = (tbl.style
-              .applymap(style_pct, subset=PERIODS)
-              .format({p: lambda x: fmt_pct(x) for p in PERIODS})
-              .set_properties(**{"font-family": "IBM Plex Mono", "font-size": "12px"}))
-    st.dataframe(styled, use_container_width=True, height=430)
-
-    # Export row
+    sc1, sc2 = st.columns([2,1])
+    with sc1: sort_by = st.selectbox("Sort by", ["Name","Sector"]+PERIODS, index=2, label_visibility="collapsed")
+    with sc2: asc = st.checkbox("Ascending", value=False)
+    tbl = filt[["BBG_Ticker","Name","Sector","Is_DR80","Quarter"]+PERIODS].copy()
+    tbl["Ticker"] = tbl.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+    tbl["Type"]   = tbl["Is_DR80"].map({True:"DR80",False:"Pipeline"})
+    tbl = tbl.drop(columns=["BBG_Ticker","Is_DR80"]).rename(columns={"Quarter":"Q"})
+    tbl = tbl[["Ticker","Name","Sector","Type","Q"]+PERIODS].sort_values(sort_by,ascending=asc,na_position="last")
+    st.dataframe(tbl.style.applymap(style_pct,subset=PERIODS)
+                 .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+                 .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                 use_container_width=True, height=430)
     e1, e2 = st.columns(2)
     with e1:
         st.download_button("⬇ Export CSV", data=tbl.to_csv(index=False),
@@ -695,123 +637,353 @@ with tab_dash:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PIPELINE
+# TAB 2 — SECTOR ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_sector:
+    st.markdown('<div class="section-header">SECTOR DEEP-DIVE</div>', unsafe_allow_html=True)
+    sel_sector = st.selectbox("Select sector", sorted(df_all["Sector"].unique()),
+                              label_visibility="collapsed", key="sector_drill")
+    sec_df = df_all[df_all["Sector"]==sel_sector].copy()
+    sec_df["Label"] = sec_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+
+    sv = sec_df["YTD"].dropna()
+    s1,s2,s3,s4 = st.columns(4)
+    with s1:
+        st.markdown(f"""<div class="metric-card"><div class="metric-label">Securities</div>
+        <div class="metric-value">{len(sec_df)}</div>
+        <div class="metric-sub">DR80: {sec_df['Is_DR80'].sum()} · Pipeline: {(~sec_df['Is_DR80']).sum()}</div></div>""", unsafe_allow_html=True)
+    with s2:
+        avg_s = float(sv.mean()) if len(sv) else 0
+        vc2 = C["pos"] if avg_s>=0 else C["neg"]
+        st.markdown(f"""<div class="metric-card {'green' if avg_s>=0 else 'red'}"><div class="metric-label">Avg YTD Return</div>
+        <div class="metric-value" style="color:{vc2}">{fmt_pct(avg_s)}</div>
+        <div class="metric-sub">Median: {fmt_pct(float(sv.median()) if len(sv) else None)}</div></div>""", unsafe_allow_html=True)
+    with s3:
+        if len(sv):
+            bs = sec_df.loc[sec_df["YTD"].idxmax()]
+            st.markdown(f"""<div class="metric-card green"><div class="metric-label">Best YTD</div>
+            <div class="metric-value" style="color:#10b981">{fmt_pct(bs['YTD'])}</div>
+            <div class="metric-sub">{bs['Label']}</div></div>""", unsafe_allow_html=True)
+    with s4:
+        if len(sv):
+            ws2 = sec_df.loc[sec_df["YTD"].idxmin()]
+            st.markdown(f"""<div class="metric-card red"><div class="metric-label">Worst YTD</div>
+            <div class="metric-value" style="color:#ef4444">{fmt_pct(ws2['YTD'])}</div>
+            <div class="metric-sub">{ws2['Label']}</div></div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-header">RETURNS BY SECURITY</div>', unsafe_allow_html=True)
+    sec_period = st.select_slider("Period", PERIODS, value="YTD", label_visibility="collapsed", key="sector_period")
+    sc_a, sc_b = st.columns([3,2])
+
+    with sc_a:
+        bar_sec = sec_df[["Label","Name",sec_period]].dropna(subset=[sec_period]).sort_values(sec_period)
+        fig_sb = go.Figure(go.Bar(
+            x=bar_sec[sec_period], y=bar_sec["Label"].astype(str), orientation="h",
+            marker_color=bar_colors(bar_sec[sec_period]), marker_line_width=0,
+            text=[f"{v:+.1f}%" for v in bar_sec[sec_period]], textposition="outside",
+            textfont=dict(family=C["font"],size=11,color=C["text"]),
+            hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
+        ))
+        fig_sb.add_vline(x=0, line_color="#334155", line_width=1)
+        fig_sb.update_layout(title=dict(text=f"{sel_sector} — {sec_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                             **base_layout(max(300,len(bar_sec)*30+60)),
+                             xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                             yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+        st.plotly_chart(fig_sb, use_container_width=True)
+
+    with sc_b:
+        pt1, pt2 = st.tabs(["DR80 vs Pipeline", "Quarter Split"])
+        with pt1:
+            type_counts = sec_df["Is_DR80"].value_counts()
+            fp1 = go.Figure(go.Pie(
+                labels=["DR80" if k else "Pipeline" for k in type_counts.index],
+                values=type_counts.values, hole=0.55,
+                marker_colors=["#3b82f6","#f59e0b"],
+                textfont=dict(family=C["font"],size=12),
+                hovertemplate="<b>%{label}</b><br>%{value}<br>%{percent}<extra></extra>",
+            ))
+            fp1.update_layout(**base_layout(280),
+                              legend=dict(font=dict(family=C["font"],size=11,color="#64748b")),
+                              annotations=[dict(text=f"<b>{len(sec_df)}</b><br>total",x=0.5,y=0.5,
+                                                showarrow=False,font=dict(family=C["font"],size=13,color="#e2e8f0"))])
+            st.plotly_chart(fp1, use_container_width=True)
+        with pt2:
+            qc2 = sec_df["Quarter"].value_counts().sort_index()
+            if len(qc2):
+                fp2 = go.Figure(go.Pie(labels=qc2.index, values=qc2.values, hole=0.55,
+                                       marker_colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"],
+                                       textfont=dict(family=C["font"],size=12),
+                                       hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
+                fp2.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=11,color="#64748b")))
+                st.plotly_chart(fp2, use_container_width=True)
+            else:
+                st.info("No pipeline securities in this sector.")
+
+    st.markdown('<div class="section-header">MULTI-PERIOD HEATMAP</div>', unsafe_allow_html=True)
+    heat_sec = sec_df[["Label"]+PERIODS].dropna(subset=["YTD"]).copy()
+    z_s = heat_sec[PERIODS].values
+    text_hs = [[f"{v:+.0f}%" if not(v is None or np.isnan(v)) else "—" for v in row] for row in z_s]
+    fig_sh = go.Figure(go.Heatmap(
+        z=z_s, x=PERIODS, y=heat_sec["Label"].astype(str).tolist(),
+        colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+        zmid=0, text=text_hs, texttemplate="%{text}",
+        textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
+        hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
+        colorbar=dict(tickfont=dict(family=C["font"],size=10,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
+                      title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b"))),
+    ))
+    fig_sh.update_layout(title=dict(text=f"{sel_sector} — All Periods",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                         **base_layout(max(260,len(heat_sec)*28+60),margin=dict(l=10,r=80,t=44,b=10)),
+                         xaxis=dict(showgrid=False,tickfont=dict(size=12)),
+                         yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11)))
+    st.plotly_chart(fig_sh, use_container_width=True)
+
+    st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
+    stbl = sec_df[["Label","Name","Is_DR80","Quarter"]+PERIODS].copy()
+    stbl["Type"] = stbl["Is_DR80"].map({True:"DR80",False:"Pipeline"})
+    stbl = stbl.drop(columns=["Is_DR80"]).rename(columns={"Label":"Ticker","Quarter":"Q"})
+    stbl = stbl[["Ticker","Name","Type","Q"]+PERIODS]
+    st.dataframe(stbl.style.applymap(style_pct,subset=PERIODS)
+                 .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+                 .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                 use_container_width=True, height=400)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_pipeline:
     pipe_df_all = df_all[~df_all["Is_DR80"]].copy()
-
     st.markdown('<div class="section-header">PIPELINE OVERVIEW</div>', unsafe_allow_html=True)
-
     if len(pipe_df_all) == 0:
         st.info("No pipeline securities found.")
     else:
-        # Sector filter for pipeline tab
         pipe_sectors = sorted(pipe_df_all["Sector"].unique())
-        pipe_sel_sectors = st.multiselect(
-            "Filter by sector",
-            options=pipe_sectors,
-            default=pipe_sectors,
-            label_visibility="collapsed",
-            placeholder="All sectors",
-            key="pipe_sector_filter"
-        )
+        pipe_sel_sectors = st.multiselect("Filter by sector", options=pipe_sectors, default=pipe_sectors,
+                                          label_visibility="collapsed", placeholder="All sectors",
+                                          key="pipe_sector_filter")
         pipe_df = pipe_df_all[pipe_df_all["Sector"].isin(pipe_sel_sectors)] if pipe_sel_sectors else pipe_df_all
-
         st.caption(f"Showing {len(pipe_df)} of {len(pipe_df_all)} pipeline securities")
-        p1, p2, p3 = st.columns(3)
 
+        p1,p2,p3 = st.columns(3)
         with p1:
             qc = pipe_df["Quarter"].value_counts().sort_index()
             fp = go.Figure(go.Pie(labels=qc.index, values=qc.values, hole=0.6,
                                   marker_colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"],
-                                  textfont=dict(family=C["font"], size=12),
+                                  textfont=dict(family=C["font"],size=12),
                                   hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
-            fp.update_layout(title=dict(text="By Quarter", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                             **base_layout(280), legend=dict(font=dict(family=C["font"], size=11, color="#64748b")),
-                             annotations=[dict(text=f"<b>{len(pipe_df)}</b><br>total", x=0.5, y=0.5,
-                                               showarrow=False, font=dict(family=C["font"], size=13, color="#e2e8f0"))])
+            fp.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=11,color="#64748b")),
+                             title=dict(text="By Quarter",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                             annotations=[dict(text=f"<b>{len(pipe_df)}</b><br>total",x=0.5,y=0.5,
+                                               showarrow=False,font=dict(family=C["font"],size=13,color="#e2e8f0"))])
             st.plotly_chart(fp, use_container_width=True)
-
         with p2:
             sc = pipe_df["Sector"].value_counts()
             fs = go.Figure(go.Pie(labels=sc.index, values=sc.values, hole=0.5,
-                                  textfont=dict(family=C["font"], size=11),
+                                  textfont=dict(family=C["font"],size=11),
                                   hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
-            fs.update_layout(title=dict(text="By Sector", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                             **base_layout(280), legend=dict(font=dict(family=C["font"], size=10, color="#64748b")))
+            fs.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=10,color="#64748b")),
+                             title=dict(text="By Sector",font=dict(family=C["font"],size=12,color="#64748b"),x=0))
             st.plotly_chart(fs, use_container_width=True)
-
         with p3:
             qa = pipe_df.groupby("Quarter")["YTD"].mean().dropna().sort_index()
-            fq = go.Figure(go.Bar(x=qa.index, y=qa.values,
-                                  marker_color=bar_colors(qa.values),
+            fq = go.Figure(go.Bar(x=qa.index, y=qa.values, marker_color=bar_colors(qa.values),
                                   text=[f"{v:+.1f}%" for v in qa.values], textposition="outside",
-                                  textfont=dict(family=C["font"], size=11, color=C["text"])))
+                                  textfont=dict(family=C["font"],size=11,color=C["text"])))
             fq.add_hline(y=0, line_color="#334155", line_width=1)
-            fq.update_layout(title=dict(text="Avg YTD by Quarter", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                             **base_layout(280, margin=dict(l=10, r=10, t=44, b=30)),
-                             xaxis=dict(showgrid=False, tickfont=dict(size=12)),
-                             yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", tickfont=dict(size=11)))
+            fq.update_layout(**base_layout(280,margin=dict(l=10,r=10,t=44,b=30)),
+                             title=dict(text="Avg YTD by Quarter",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                             xaxis=dict(showgrid=False,tickfont=dict(size=12)),
+                             yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)))
             st.plotly_chart(fq, use_container_width=True)
 
-        # Scatter
         st.markdown('<div class="section-header">POSITIONING — YTD vs 1Y</div>', unsafe_allow_html=True)
-        sdf = pipe_df.dropna(subset=["YTD", "1Y"]).copy()
-        sdf["S"] = sdf.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+        sdf = pipe_df.dropna(subset=["YTD","1Y"]).copy()
+        sdf["S"] = sdf.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
         sec_colors = ["#3b82f6","#10b981","#f59e0b","#8b5cf6","#ef4444","#06b6d4","#f97316","#84cc16"]
         fscat = go.Figure()
-        for i, (sec, grp) in enumerate(sdf.groupby("Sector")):
-            fscat.add_trace(go.Scatter(
-                x=grp["YTD"], y=grp["1Y"], mode="markers+text", name=sec,
-                marker=dict(color=sec_colors[i % len(sec_colors)], size=10, opacity=0.85),
-                text=grp["S"], textposition="top center",
-                textfont=dict(family=C["font"], size=10, color=C["text"]),
-                hovertemplate="<b>%{text}</b><br>YTD: %{x:.1f}%<br>1Y: %{y:.1f}%<extra></extra>",
-            ))
-        fscat.add_hline(y=0, line_color="#334155", line_width=1)
-        fscat.add_vline(x=0, line_color="#334155", line_width=1)
-        fscat.update_layout(title=dict(text="Pipeline: YTD vs 1-Year", font=dict(family=C["font"], size=12, color="#64748b"), x=0),
-                            **base_layout(420, margin=dict(l=10, r=10, t=44, b=60)),
-                            xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", title="YTD",
-                                       tickfont=dict(size=11)),
-                            yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", title="1-Year",
-                                       tickfont=dict(size=11)),
-                            legend=dict(font=dict(family=C["font"], size=10, color="#64748b"), orientation="h", y=-0.2))
+        for i,(sec,grp) in enumerate(sdf.groupby("Sector")):
+            fscat.add_trace(go.Scatter(x=grp["YTD"],y=grp["1Y"],mode="markers+text",name=sec,
+                marker=dict(color=sec_colors[i%len(sec_colors)],size=10,opacity=0.85),
+                text=grp["S"],textposition="top center",
+                textfont=dict(family=C["font"],size=10,color=C["text"]),
+                hovertemplate="<b>%{text}</b><br>YTD: %{x:.1f}%<br>1Y: %{y:.1f}%<extra></extra>"))
+        fscat.add_hline(y=0,line_color="#334155",line_width=1)
+        fscat.add_vline(x=0,line_color="#334155",line_width=1)
+        fscat.update_layout(title=dict(text="Pipeline: YTD vs 1-Year",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                            **base_layout(420,margin=dict(l=10,r=10,t=44,b=60)),
+                            xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="YTD",tickfont=dict(size=11)),
+                            yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="1-Year",tickfont=dict(size=11)),
+                            legend=dict(font=dict(family=C["font"],size=10,color="#64748b"),orientation="h",y=-0.2))
         st.plotly_chart(fscat, use_container_width=True)
 
-        # Pipeline table
         st.markdown('<div class="section-header">PIPELINE TABLE</div>', unsafe_allow_html=True)
-        pt = pipe_df[["BBG_Ticker", "Name", "Sector", "Quarter"] + PERIODS].copy()
-        pt["Ticker"] = pt.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
-        pt = pt.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter": "Q"})
-        pt = pt[["Ticker", "Name", "Sector", "Q"] + PERIODS]
-        styled_pt = (pt.style
-                     .applymap(style_pct, subset=PERIODS)
+        pt = pipe_df[["BBG_Ticker","Name","Sector","Quarter"]+PERIODS].copy()
+        pt["Ticker"] = pt.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+        pt = pt.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter":"Q"})
+        pt = pt[["Ticker","Name","Sector","Q"]+PERIODS]
+        st.dataframe(pt.style.applymap(style_pct,subset=PERIODS)
                      .format({p: lambda x: fmt_pct(x) for p in PERIODS})
-                     .set_properties(**{"font-family": "IBM Plex Mono", "font-size": "12px"}))
-        st.dataframe(styled_pt, use_container_width=True, height=380)
+                     .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                     use_container_width=True, height=380)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ADD SECURITY
+# TAB 4 — COMPETITORS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_competitors:
+    comp_df = st.session_state.competitors_df
+    if comp_df is None or len(comp_df) == 0:
+        st.markdown('<div class="section-header">COMPETITORS</div>', unsafe_allow_html=True)
+        st.info("""No **Competitors** sheet found in the Excel file.
+
+Add a sheet named **`Competitors`** to `DR80_Tracking.xlsx` using the same layout as `Current DR80`:
+- Column B: Bloomberg ticker · Column C: Company name
+- Column D: Label *(optional)* · Columns E–K: YTD, 1M, 3M, 6M, 1Y, 3Y, 5Y
+- Use same sector header rows (col B = sector name, col C = "name")
+
+Then re-upload the file.""")
+    else:
+        dr80_only = df_all[df_all["Is_DR80"]].copy()
+        comp_groups = sorted(comp_df["Sector"].unique())
+
+        st.markdown('<div class="section-header">COMPETITOR GROUPS</div>', unsafe_allow_html=True)
+        sel_group = st.selectbox("Select group", comp_groups, label_visibility="collapsed", key="comp_group")
+        group_df = comp_df[comp_df["Sector"]==sel_group].copy()
+        group_df["Label"] = group_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+
+        # Match DR80 peers: 1) exact base-code match, 2) same sector fallback
+        comp_codes = set(short_ticker(t).upper().replace("80","") for t in group_df["BBG_Ticker"])
+        dr80_peers = []
+        for _, r in dr80_only.iterrows():
+            dr_base = short_ticker(r["BBG_Ticker"]).upper().replace("80","")
+            if dr_base in comp_codes or r["Sector"] == sel_group:
+                dr80_peers.append(r)
+        peers_df = pd.DataFrame(dr80_peers) if dr80_peers else pd.DataFrame(columns=df_all.columns)
+        if len(peers_df):
+            peers_df = peers_df.copy()
+            peers_df["Label"] = peers_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+
+        comp_period = st.select_slider("Period", PERIODS, value="YTD", label_visibility="collapsed", key="comp_period")
+
+        # ── Side-by-side bars ──────────────────────────────────────────────────
+        st.markdown('<div class="section-header">DR80 vs COMPETITORS — SIDE BY SIDE</div>', unsafe_allow_html=True)
+        cmp_a, cmp_b = st.columns(2)
+
+        with cmp_a:
+            n_peers = len(peers_df)
+            st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#3b82f6;margin-bottom:8px;">◆ DR80 PEERS ({n_peers})</div>', unsafe_allow_html=True)
+            if n_peers:
+                pp2 = peers_df[["Label",comp_period]].dropna(subset=[comp_period]).sort_values(comp_period)
+                fig_p = go.Figure(go.Bar(
+                    x=pp2[comp_period], y=pp2["Label"].astype(str), orientation="h",
+                    marker_color=bar_colors(pp2[comp_period]), marker_line_width=0,
+                    text=[f"{v:+.1f}%" for v in pp2[comp_period]], textposition="outside",
+                    textfont=dict(family=C["font"],size=11),
+                    hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>"))
+                fig_p.add_vline(x=0,line_color="#334155",line_width=1)
+                fig_p.update_layout(title=dict(text=f"DR80 — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                                    **base_layout(max(280,n_peers*32+80)),
+                                    xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                                    yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+                st.plotly_chart(fig_p, use_container_width=True)
+            else:
+                st.info("No DR80 peers matched for this group.")
+
+        with cmp_b:
+            n_comp = len(group_df)
+            st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#f59e0b;margin-bottom:8px;">◆ COMPETITORS ({n_comp})</div>', unsafe_allow_html=True)
+            cp2 = group_df[["Label",comp_period]].dropna(subset=[comp_period]).sort_values(comp_period)
+            fig_c = go.Figure(go.Bar(
+                x=cp2[comp_period], y=cp2["Label"].astype(str), orientation="h",
+                marker_color="#f59e0b", marker_line_width=0,
+                text=[f"{v:+.1f}%" for v in cp2[comp_period]], textposition="outside",
+                textfont=dict(family=C["font"],size=11),
+                hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>"))
+            fig_c.add_vline(x=0,line_color="#334155",line_width=1)
+            fig_c.update_layout(title=dict(text=f"Competitors — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                                **base_layout(max(280,n_comp*32+80)),
+                                xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                                yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+            st.plotly_chart(fig_c, use_container_width=True)
+
+        # ── Combined ranked chart ──────────────────────────────────────────────
+        st.markdown('<div class="section-header">COMBINED RANKING</div>', unsafe_allow_html=True)
+        peers_plot = peers_df[["Label","Name",comp_period]].copy() if len(peers_df) else pd.DataFrame(columns=["Label","Name",comp_period])
+        peers_plot["Type"] = "DR80"
+        comp_plot2 = group_df[["Label","Name",comp_period]].copy(); comp_plot2["Type"] = "Competitor"
+        combined = pd.concat([peers_plot, comp_plot2]).dropna(subset=[comp_period]).sort_values(comp_period)
+        type_colors = combined["Type"].map({"DR80":"#3b82f6","Competitor":"#f59e0b"}).tolist()
+        fig_comb = go.Figure(go.Bar(
+            x=combined[comp_period], y=combined["Label"].astype(str), orientation="h",
+            marker_color=type_colors, marker_line_width=0,
+            text=[f"{v:+.1f}%" for v in combined[comp_period]], textposition="outside",
+            textfont=dict(family=C["font"],size=11),
+            customdata=list(zip(combined["Type"],combined["Name"])),
+            hovertemplate="<b>%{y}</b><br>%{customdata[0]}<br>%{customdata[1]}<br>%{x:.1f}%<extra></extra>"))
+        for lbl, col in [("DR80","#3b82f6"),("Competitor","#f59e0b")]:
+            fig_comb.add_trace(go.Bar(x=[None],y=[None],orientation="h",name=lbl,marker_color=col,showlegend=True))
+        fig_comb.add_vline(x=0,line_color="#334155",line_width=1)
+        fig_comb.update_layout(title=dict(text=f"Combined Ranking — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                               **base_layout(max(300,len(combined)*28+80),margin=dict(l=10,r=80,t=44,b=10)),
+                               xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
+                               yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"),
+                               legend=dict(font=dict(family=C["font"],size=11,color="#94a3b8"),bgcolor="rgba(0,0,0,0)",
+                                           bordercolor="#1e2d4a",orientation="h",x=0,y=1.04),
+                               barmode="relative")
+        st.plotly_chart(fig_comb, use_container_width=True)
+
+        # ── Heatmap DR80 + Competitors ─────────────────────────────────────────
+        st.markdown('<div class="section-header">MULTI-PERIOD HEATMAP — DR80 vs COMPETITORS</div>', unsafe_allow_html=True)
+        heat_comp = group_df[["Label"]+PERIODS].dropna(subset=["YTD"]).copy()
+        if len(peers_df):
+            heat_dr = peers_df[["Label"]+PERIODS].dropna(subset=["YTD"]).copy()
+            sep1 = pd.DataFrame([{"Label":"── DR80 PEERS ──",**{p:np.nan for p in PERIODS}}])
+            sep2 = pd.DataFrame([{"Label":"── COMPETITORS ──",**{p:np.nan for p in PERIODS}}])
+            heat_all = pd.concat([sep1,heat_dr,sep2,heat_comp],ignore_index=True)
+        else:
+            heat_all = heat_comp
+        z_c = heat_all[PERIODS].values.astype(float)
+        text_c = [[f"{v:+.0f}%" if not np.isnan(v) else "" for v in row] for row in z_c]
+        fig_ch = go.Figure(go.Heatmap(
+            z=z_c, x=PERIODS, y=heat_all["Label"].astype(str).tolist(),
+            colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+            zmid=0, text=text_c, texttemplate="%{text}",
+            textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
+            hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
+            colorbar=dict(tickfont=dict(family=C["font"],size=10,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
+                          title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")))))
+        fig_ch.update_layout(title=dict(text=f"{sel_group} — DR80 vs Competitors",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                             **base_layout(max(280,len(heat_all)*26+60),margin=dict(l=10,r=80,t=44,b=10)),
+                             xaxis=dict(showgrid=False,tickfont=dict(size=12)),
+                             yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11)))
+        st.plotly_chart(fig_ch, use_container_width=True)
+
+        # ── Competitor table ───────────────────────────────────────────────────
+        st.markdown('<div class="section-header">COMPETITOR TABLE</div>', unsafe_allow_html=True)
+        ctbl = group_df[["Label","Name","Sector"]+PERIODS].rename(columns={"Label":"Ticker"})
+        st.dataframe(ctbl.style.applymap(style_pct,subset=PERIODS)
+                     .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+                     .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                     use_container_width=True, height=380)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — ADD SECURITY
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_add:
     st.markdown('<div class="section-header">ADD PIPELINE SECURITY</div>', unsafe_allow_html=True)
-
-    col_f, col_p = st.columns([1, 1])
+    col_f, col_p = st.columns([1,1])
 
     with col_f:
-        st.markdown("Fill in the form below. Bloomberg ticker is auto-converted to Yahoo Finance format for data fetching.")
-        st.markdown("")
-
+        st.markdown("Bloomberg ticker is auto-converted to Yahoo Finance format for data fetching.")
         with st.form("add_form", clear_on_submit=True):
-            bbg_in = st.text_input("Bloomberg Ticker *", placeholder="e.g. AAPL US Equity, 9988 HK Equity, 6857 JP Equity")
+            bbg_in  = st.text_input("Bloomberg Ticker *", placeholder="e.g. AAPL US Equity, 9988 HK Equity")
             name_in = st.text_input("Company Name *", placeholder="e.g. Apple Inc")
-            q_in = st.selectbox("Target Quarter", ["Q1", "Q2", "Q3"])
-            sec_in = st.selectbox("Sector", SECTORS)
+            q_in    = st.selectbox("Target Quarter", ["Q1","Q2","Q3"])
+            sec_in  = st.selectbox("Sector", SECTORS)
             fetch_on = st.checkbox("Fetch return data from Yahoo Finance", value=True)
-            add_btn = st.form_submit_button("➕ Add Security", use_container_width=True)
-
+            add_btn  = st.form_submit_button("➕ Add Security", use_container_width=True)
         if add_btn:
             if not bbg_in.strip() or not name_in.strip():
                 st.error("Bloomberg ticker and company name are required.")
@@ -820,11 +992,8 @@ with tab_add:
             else:
                 bbg_clean = bbg_in.strip()
                 yahoo = bbg_to_yahoo(bbg_clean)
-                new_row = {"BBG_Ticker": bbg_clean, "Yahoo_Ticker": yahoo,
-                           "Name": name_in.strip(), "Sector": sec_in,
-                           "Quarter": q_in, "Is_DR80": False,
-                           **{p: None for p in PERIODS}}
-
+                new_row = {"BBG_Ticker":bbg_clean,"Yahoo_Ticker":yahoo,"Name":name_in.strip(),
+                           "Sector":sec_in,"Quarter":q_in,"Is_DR80":False,**{p:None for p in PERIODS}}
                 if fetch_on:
                     if yahoo:
                         with st.spinner(f"Fetching {yahoo}…"):
@@ -832,54 +1001,39 @@ with tab_add:
                         new_row.update(rets)
                         st.success(f"✓ Fetched data for {yahoo}")
                     else:
-                        st.warning("TB Equity tickers are not available on Yahoo Finance — added without returns.")
-
-                st.session_state.df = pd.concat(
-                    [st.session_state.df, pd.DataFrame([new_row])], ignore_index=True
-                )
+                        st.warning("TB Equity tickers not available on Yahoo Finance — added without returns.")
+                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame([new_row])], ignore_index=True)
                 st.success(f"✓ Added **{bbg_clean}** ({name_in.strip()}) → {sec_in} / {q_in}")
                 st.rerun()
 
     with col_p:
-        # Live ticker preview
         st.markdown("**Ticker Conversion Preview**")
-        preview_bbg = st.text_input("Type a Bloomberg ticker to preview", placeholder="e.g. 9984 JP Equity",
-                                    label_visibility="collapsed")
+        preview_bbg = st.text_input("", placeholder="e.g. 9984 JP Equity", label_visibility="collapsed")
         if preview_bbg.strip():
             py = bbg_to_yahoo(preview_bbg.strip())
-            st.markdown(f"""
-            <div style="font-family:IBM Plex Mono;font-size:0.8rem;background:#111827;border:1px solid #1e2d4a;border-radius:8px;padding:16px;margin-bottom:16px;">
+            st.markdown(f"""<div style="font-family:IBM Plex Mono;font-size:0.8rem;background:#111827;border:1px solid #1e2d4a;border-radius:8px;padding:16px;margin-bottom:16px;">
             <div style="color:#475569;font-size:0.65rem;text-transform:uppercase;margin-bottom:10px;">Conversion Result</div>
             <div style="color:#94a3b8;margin-bottom:6px;">Bloomberg: <span style="color:#e2e8f0">{preview_bbg.strip()}</span></div>
-            <div style="color:#94a3b8;">Yahoo Finance: <span style="color:{'#10b981' if py else '#ef4444'}">{py if py else 'N/A (TB Equity / unknown exchange)'}</span></div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            <div style="color:#94a3b8;">Yahoo Finance: <span style="color:{'#10b981' if py else '#ef4444'}">{py or 'N/A (TB Equity)'}</span></div>
+            </div>""", unsafe_allow_html=True)
         st.markdown("**Current Pipeline**")
         if st.session_state.df is not None:
-            pp = st.session_state.df[~st.session_state.df["Is_DR80"]][
-                ["BBG_Ticker", "Name", "Sector", "Quarter", "YTD"]].copy()
-            pp["Ticker"] = pp["BBG_Ticker"].apply(short_ticker)
+            pp = st.session_state.df[~st.session_state.df["Is_DR80"]][["BBG_Ticker","Name","Sector","Quarter","YTD"]].copy()
+            pp["Ticker"] = pp.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1)
             pp["YTD"] = pp["YTD"].apply(fmt_pct)
-            pp = pp.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter": "Q"})
-            pp = pp[["Ticker", "Name", "Sector", "Q", "YTD"]]
-            st.dataframe(pp, use_container_width=True, height=360, hide_index=True)
+            pp = pp.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter":"Q"})
+            st.dataframe(pp[["Ticker","Name","Sector","Q","YTD"]], use_container_width=True, height=360, hide_index=True)
 
-    # Save section
     st.markdown("---")
     st.markdown('<div class="section-header">SAVE TO EXCEL</div>', unsafe_allow_html=True)
-    st.caption("Downloads a new Excel file preserving the original DR80_Tracking.xlsx structure, with updated returns and any new pipeline entries appended under their correct sector.")
-
+    st.caption("Downloads updated Excel preserving original structure with refreshed returns and new pipeline entries.")
     if st.session_state.excel_bytes and st.session_state.df is not None:
-        if st.button("Generate Updated Excel", use_container_width=False):
+        if st.button("Generate Updated Excel"):
             with st.spinner("Writing Excel…"):
                 xl = write_excel(st.session_state.excel_bytes, st.session_state.df)
-            st.download_button(
-                "⬇ Download Updated DR80_Tracking.xlsx",
-                data=xl,
-                file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            st.download_button("⬇ Download Updated DR80_Tracking.xlsx", data=xl,
+                               file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("Load a file in the sidebar first.")
 
