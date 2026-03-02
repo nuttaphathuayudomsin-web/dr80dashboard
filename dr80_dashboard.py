@@ -92,6 +92,7 @@ def short_ticker(bbg: str) -> str:
     return bbg.strip()
 
 
+@st.cache_data(show_spinner=False)
 def display_label(bbg: str, name: str, max_len: int = 15) -> str:
     """
     For numeric-code tickers (e.g. 300476, 9984), return a shortened company name.
@@ -113,6 +114,7 @@ def display_label(bbg: str, name: str, max_len: int = 15) -> str:
 
 
 # ── Excel parsing ──────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
 def _parse_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Parse a DR80-structured sheet (sector headers + ticker rows) into a DataFrame."""
     records = []
@@ -143,11 +145,13 @@ def _parse_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def parse_excel(file_obj) -> pd.DataFrame:
-    df_raw = pd.read_excel(file_obj, sheet_name="Current DR80", header=None)
+@st.cache_data(show_spinner=False)
+def parse_excel(file_bytes: bytes) -> pd.DataFrame:
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Current DR80", header=None)
     return _parse_sheet(df_raw)
 
 
+@st.cache_data(show_spinner=False)
 def parse_competitors(file_bytes: bytes) -> pd.DataFrame:
     """Parse the 'Competitors' sheet if it exists, else return empty DataFrame."""
     try:
@@ -156,7 +160,7 @@ def parse_competitors(file_bytes: bytes) -> pd.DataFrame:
             return pd.DataFrame()
         df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Competitors", header=None)
         df = _parse_sheet(df_raw)
-        df["Is_DR80"] = False   # competitors are never DR80
+        df["Is_DR80"] = False
         return df
     except Exception:
         return pd.DataFrame()
@@ -317,6 +321,57 @@ def style_pct(v):
 def bar_colors(vals):
     return [C["pos"] if v >= 0 else C["neg"] for v in vals]
 
+@st.cache_data(show_spinner=False)
+def build_top_bottom_chart(data: bytes, period: str):
+    df = pd.read_json(io.BytesIO(data))
+    df["S"] = df.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+    seen = {}; deduped = []
+    for lbl in df["S"]:
+        if lbl in seen: seen[lbl]+=1; deduped.append(f"{lbl} ({seen[lbl]})")
+        else: seen[lbl]=0; deduped.append(lbl)
+    df["S"] = deduped
+    df = df.sort_values(period, ascending=False)
+    half = min(15, len(df)//2)
+    bar_df = pd.concat([df.head(half), df.tail(half)]).drop_duplicates().sort_values(period)
+    bar_h = max(320, len(bar_df)*28+60)
+    fig = go.Figure(go.Bar(
+        x=bar_df[period], y=bar_df["S"].astype(str), orientation="h",
+        marker_color=bar_colors(bar_df[period]), marker_line_width=0,
+        text=[f"{v:+.1f}%" for v in bar_df[period]], textposition="outside",
+        textfont=dict(family=C["font"], size=13, color=C["text"]),
+        hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
+    ))
+    fig.add_vline(x=0, line_color="#334155", line_width=1)
+    fig.update_layout(title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                      **base_layout(bar_h), xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                      yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"))
+    return fig
+
+@st.cache_data(show_spinner=False)
+def build_heatmap(data: bytes, period: str):
+    df = pd.read_json(io.BytesIO(data))
+    df["S"] = df.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+    df["abs_ytd"] = df["YTD"].abs()
+    df = df.dropna(subset=["YTD"]).nlargest(20, "abs_ytd")
+    z = df[PERIODS].values
+    heat_h = max(380, len(df)*26+60)
+    text_vals = [[f"{v:+.0f}%" if not (v is None or np.isnan(v)) else "—" for v in row] for row in z]
+    fig = go.Figure(go.Heatmap(
+        z=z, x=PERIODS, y=df["S"].tolist(),
+        colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+        zmid=0, text=text_vals, texttemplate="%{text}",
+        textfont=dict(family=C["font"],size=13,color="#e2e8f0"),
+        hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
+        colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b")),
+                      tickfont=dict(family=C["font"],size=13,color="#94a3b8"),
+                      ticksuffix="%",thickness=14,len=0.9,tickvals=[-100,-50,0,50,100]),
+    ))
+    fig.update_layout(title=dict(text="Multi-Period Heatmap — Top 20 by |YTD|",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                      **base_layout(heat_h,margin=dict(l=10,r=80,t=50,b=10)),
+                      xaxis=dict(showgrid=False,tickfont=dict(size=14,color="#94a3b8"),side="bottom"),
+                      yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=14,color="#e2e8f0")))
+    return fig
+
 
 # ── Session state ──────────────────────────────────────────────────────────────
 for key, default in [("df", None), ("excel_bytes", None),
@@ -330,7 +385,7 @@ if st.session_state.df is None and os.path.exists(DEFAULT_FILE):
     with open(DEFAULT_FILE, "rb") as f:
         b = f.read()
     st.session_state.excel_bytes = b
-    st.session_state.df = parse_excel(io.BytesIO(b))
+    st.session_state.df = parse_excel(b)
     st.session_state.competitors_df = parse_competitors(b)
     st.session_state.source_label = DEFAULT_FILE
 
@@ -347,7 +402,7 @@ with st.sidebar:
     if uploaded:
         b = uploaded.read()
         st.session_state.excel_bytes = b
-        st.session_state.df = parse_excel(io.BytesIO(b))
+        st.session_state.df = parse_excel(b)
         st.session_state.competitors_df = parse_competitors(b)
         st.session_state.source_label = uploaded.name
         st.session_state.last_refresh = None
@@ -426,7 +481,7 @@ if st.session_state.df is None:
 
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
-df_all = st.session_state.df.copy()
+df_all = st.session_state.df
 filt = df_all.copy()
 
 if universe == "DR80 Only":
@@ -552,7 +607,8 @@ with tab_dash:
     # ── Vintage Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">VINTAGE ANALYSIS — PERFORMANCE BY ISSUANCE QUARTER</div>', unsafe_allow_html=True)
     vtg_df = filt.dropna(subset=["Quarter"]).copy()
-    vtg_df["Label"] = vtg_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+    if len(vtg_df):
+        vtg_df["Label"] = vtg_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
 
     if len(vtg_df) == 0:
         st.info("No quarter/vintage data available.")
@@ -587,7 +643,7 @@ with tab_dash:
         with va2:
             # Heatmap: each security row, sorted by quarter then YTD
             vtg_heat = vtg_df.sort_values(["Quarter","YTD"], ascending=[True, False])
-            vtg_heat = vtg_heat[["Label","Quarter"]+PERIODS].dropna(subset=["YTD"]).head(30)
+            vtg_heat = vtg_heat[["Label","Quarter"]+PERIODS].dropna(subset=["YTD"]).head(20)
             # Label includes quarter prefix for readability
             vtg_heat["RowLabel"] = vtg_heat["Quarter"].astype(str) + "  " + vtg_heat["Label"].astype(str)
             z_v = vtg_heat[PERIODS].values.astype(float)
@@ -696,11 +752,12 @@ with tab_dash:
         st.plotly_chart(fig4, use_container_width=True)
 
     st.markdown('<div class="section-header">SECTOR HEATMAP — AVG & MEDIAN RETURNS</div>', unsafe_allow_html=True)
+    _sec_avgs = filt.groupby("Sector")[PERIODS].mean()
+    _sec_meds = filt.groupby("Sector")[PERIODS].median()
     z_sec=[]; y_sec=[]
     for sec in sorted(filt["Sector"].unique()):
-        sd = filt[filt["Sector"]==sec]
-        z_sec.append([sd[p].mean() if sd[p].notna().sum()>0 else np.nan for p in PERIODS]); y_sec.append(f"{sec}  avg")
-        z_sec.append([sd[p].median() if sd[p].notna().sum()>0 else np.nan for p in PERIODS]); y_sec.append(f"{sec}  med")
+        z_sec.append(_sec_avgs.loc[sec].values if sec in _sec_avgs.index else [np.nan]*len(PERIODS)); y_sec.append(f"{sec}  avg")
+        z_sec.append(_sec_meds.loc[sec].values if sec in _sec_meds.index else [np.nan]*len(PERIODS)); y_sec.append(f"{sec}  med")
     z_sec_arr = np.array(z_sec, dtype=float)
     sec_h = max(300, len(y_sec)*22+60)
     text_sec = [[f"{v:+.0f}%" if not np.isnan(v) else "—" for v in row] for row in z_sec_arr]
@@ -755,6 +812,15 @@ with tab_sector:
     sel_sector = st.selectbox("Select sector", sorted(df_all["Sector"].unique()),
                               label_visibility="collapsed", key="sector_drill")
     sec_df = df_all[df_all["Sector"]==sel_sector].copy()
+
+    # DR80 / Pipeline filter
+    sec_universe = st.radio("Universe", ["All", "DR80 Only", "Pipeline Only"],
+                            horizontal=True, label_visibility="collapsed", key="sector_universe")
+    if sec_universe == "DR80 Only":
+        sec_df = sec_df[sec_df["Is_DR80"]]
+    elif sec_universe == "Pipeline Only":
+        sec_df = sec_df[~sec_df["Is_DR80"]]
+
     sec_df["Label"] = sec_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
 
     sv = sec_df["YTD"].dropna()
