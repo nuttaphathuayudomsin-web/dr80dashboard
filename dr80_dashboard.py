@@ -31,9 +31,9 @@ section[data-testid="stSidebar"] * { color: #94a3b8 !important; }
 .metric-card::before { content:''; position:absolute; top:0; left:0; width:3px; height:100%; background:#3b82f6; }
 .metric-card.green::before { background:#10b981; }
 .metric-card.red::before { background:#ef4444; }
-.metric-label { font-family:'IBM Plex Mono',monospace; font-size:0.65rem; text-transform:uppercase; letter-spacing:0.1em; color:#475569; margin-bottom:4px; }
-.metric-value { font-family:'IBM Plex Mono',monospace; font-size:1.5rem; font-weight:600; color:#e2e8f0; }
-.metric-sub { font-size:0.75rem; color:#64748b; margin-top:2px; }
+.metric-label { font-family:'IBM Plex Mono',monospace; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; color:#475569; margin-bottom:4px; }
+.metric-value { font-family:'IBM Plex Mono',monospace; font-size:1.8rem; font-weight:600; color:#e2e8f0; }
+.metric-sub { font-size:0.85rem; color:#64748b; margin-top:2px; }
 .section-header { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.12em; color:#3b82f6; border-bottom:1px solid #1e2d4a; padding-bottom:8px; margin-bottom:16px; margin-top:24px; }
 .dashboard-title { font-family:'IBM Plex Mono',monospace; font-size:1.4rem; font-weight:600; color:#e2e8f0; letter-spacing:-0.02em; }
 .dashboard-sub { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; color:#334155; letter-spacing:0.05em; }
@@ -300,9 +300,9 @@ C = {"bg": "rgba(0,0,0,0)", "grid": "#1e2d4a", "text": "#94a3b8",
      "pos": "#10b981", "neg": "#ef4444", "blue": "#3b82f6", "font": "IBM Plex Mono"}
 
 def base_layout(h=350, margin=None):
-    m = margin or dict(l=10, r=10, t=44, b=10)
+    m = margin or dict(l=10, r=10, t=50, b=10)
     return dict(paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
-                font=dict(family=C["font"], color=C["text"], size=11),
+                font=dict(family=C["font"], color=C["text"], size=14),
                 height=h, margin=m)
 
 def fmt_pct(v, d=1):
@@ -499,6 +499,117 @@ with tab_dash:
         <div class="metric-value">{hit_r:.0f}%</div>
         <div class="metric-sub">+ve return for {period}</div></div>""", unsafe_allow_html=True)
 
+    st.markdown('<div class="section-header">BREAKDOWN</div>', unsafe_allow_html=True)
+    pie1, pie2, pie3 = st.columns(3)
+
+    with pie1:
+        # By Sector donut
+        sec_counts = filt["Sector"].value_counts()
+        sec_colors_pie = ["#3b82f6","#10b981","#f59e0b","#8b5cf6","#ef4444","#06b6d4","#f97316","#84cc16"]
+        fig_ps = go.Figure(go.Pie(
+            labels=sec_counts.index, values=sec_counts.values, hole=0.55,
+            marker=dict(colors=sec_colors_pie[:len(sec_counts)]),
+            textfont=dict(family=C["font"], size=14),
+            hovertemplate="<b>%{label}</b><br>%{value} securities<br>%{percent}<extra></extra>",
+        ))
+        fig_ps.update_layout(title=dict(text="By Sector", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                             **base_layout(300), legend=dict(font=dict(family=C["font"],size=13,color="#94a3b8")))
+        st.plotly_chart(fig_ps, use_container_width=True)
+
+    with pie2:
+        # By Type donut (DR80 vs Pipeline)
+        type_counts = filt["Is_DR80"].value_counts()
+        fig_pt = go.Figure(go.Pie(
+            labels=["DR80" if k else "Pipeline" for k in type_counts.index],
+            values=type_counts.values, hole=0.55,
+            marker=dict(colors=["#3b82f6","#f59e0b"]),
+            textfont=dict(family=C["font"], size=14),
+            hovertemplate="<b>%{label}</b><br>%{value}<br>%{percent}<extra></extra>",
+        ))
+        fig_pt.update_layout(title=dict(text="DR80 vs Pipeline", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                             **base_layout(300),
+                             legend=dict(font=dict(family=C["font"],size=13,color="#94a3b8")),
+                             annotations=[dict(text=f"<b>{len(filt)}</b><br>total", x=0.5, y=0.5,
+                                               showarrow=False, font=dict(family=C["font"],size=16,color="#e2e8f0"))])
+        st.plotly_chart(fig_pt, use_container_width=True)
+
+    with pie3:
+        # By Vintage (Quarter) donut
+        vtg = filt["Quarter"].value_counts().sort_index()
+        if len(vtg):
+            fig_pv = go.Figure(go.Pie(
+                labels=vtg.index, values=vtg.values, hole=0.55,
+                marker=dict(colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"]),
+                textfont=dict(family=C["font"], size=14),
+                hovertemplate="<b>%{label}</b><br>%{value} securities<br>%{percent}<extra></extra>",
+            ))
+            fig_pv.update_layout(title=dict(text="By Vintage (Quarter)", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                                 **base_layout(300), legend=dict(font=dict(family=C["font"],size=13,color="#94a3b8")))
+            st.plotly_chart(fig_pv, use_container_width=True)
+        else:
+            st.info("No quarter data available.")
+
+    # ── Vintage Analysis ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">VINTAGE ANALYSIS — PERFORMANCE BY ISSUANCE QUARTER</div>', unsafe_allow_html=True)
+    vtg_df = filt.dropna(subset=["Quarter"]).copy()
+    vtg_df["Label"] = vtg_df.apply(lambda r: display_label(r["BBG_Ticker"],r["Name"]),axis=1).astype(str)
+
+    if len(vtg_df) == 0:
+        st.info("No quarter/vintage data available.")
+    else:
+        va1, va2 = st.columns([2, 3])
+        with va1:
+            # Bar: avg return per period per vintage
+            vtg_avgs = vtg_df.groupby("Quarter")[PERIODS].mean()
+            vtg_avgs = vtg_avgs.sort_index()
+            fig_va = go.Figure()
+            bar_colors_vtg = ["#3b82f6","#10b981","#f59e0b","#8b5cf6"]
+            for i, (qtr, row) in enumerate(vtg_avgs.iterrows()):
+                fig_va.add_trace(go.Bar(
+                    name=qtr, x=PERIODS, y=row.values,
+                    marker_color=bar_colors_vtg[i % len(bar_colors_vtg)],
+                    text=[f"{v:+.0f}%" if not np.isnan(v) else "" for v in row.values],
+                    textposition="outside",
+                    textfont=dict(family=C["font"], size=13),
+                    hovertemplate=f"<b>{qtr}</b><br>%{{x}}: %{{y:.1f}}%<extra></extra>",
+                ))
+            fig_va.add_hline(y=0, line_color="#334155", line_width=1)
+            fig_va.update_layout(
+                title=dict(text="Avg Return by Vintage & Period", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                **base_layout(360, margin=dict(l=10,r=10,t=50,b=10)),
+                barmode="group",
+                xaxis=dict(showgrid=False, tickfont=dict(size=14)),
+                yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", tickfont=dict(size=14)),
+                legend=dict(font=dict(family=C["font"],size=13,color="#94a3b8"), orientation="h", y=1.12),
+            )
+            st.plotly_chart(fig_va, use_container_width=True)
+
+        with va2:
+            # Heatmap: each security row, sorted by quarter then YTD
+            vtg_heat = vtg_df.sort_values(["Quarter","YTD"], ascending=[True, False])
+            vtg_heat = vtg_heat[["Label","Quarter"]+PERIODS].dropna(subset=["YTD"]).head(30)
+            # Label includes quarter prefix for readability
+            vtg_heat["RowLabel"] = vtg_heat["Quarter"].astype(str) + "  " + vtg_heat["Label"].astype(str)
+            z_v = vtg_heat[PERIODS].values.astype(float)
+            text_v = [[f"{v:+.0f}%" if not np.isnan(v) else "—" for v in row] for row in z_v]
+            fig_vh = go.Figure(go.Heatmap(
+                z=z_v, x=PERIODS, y=vtg_heat["RowLabel"].tolist(),
+                colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
+                zmid=0, text=text_v, texttemplate="%{text}",
+                textfont=dict(family=C["font"], size=16, color="#e2e8f0"),
+                hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
+                colorbar=dict(tickfont=dict(family=C["font"],size=13,color="#94a3b8"), ticksuffix="%",
+                              thickness=14, len=0.9,
+                              title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b"))),
+            ))
+            fig_vh.update_layout(
+                title=dict(text="Vintage Heatmap — Top 30 by Quarter", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                **base_layout(max(400, len(vtg_heat)*26+60), margin=dict(l=10,r=80,t=50,b=10)),
+                xaxis=dict(showgrid=False, tickfont=dict(size=14,color="#94a3b8")),
+                yaxis=dict(showgrid=False, autorange="reversed", tickfont=dict(size=13,color="#e2e8f0")),
+            )
+            st.plotly_chart(fig_vh, use_container_width=True)
+
     st.markdown('<div class="section-header">PERFORMANCE</div>', unsafe_allow_html=True)
     ca, cb = st.columns([3, 2])
 
@@ -518,13 +629,13 @@ with tab_dash:
             x=bar_df[period], y=bar_df["S"].astype(str), orientation="h",
             marker_color=bar_colors(bar_df[period]), marker_line_width=0,
             text=[f"{v:+.1f}%" for v in bar_df[period]], textposition="outside",
-            textfont=dict(family=C["font"], size=10, color=C["text"]),
+            textfont=dict(family=C["font"], size=13, color=C["text"]),
             hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
         ))
         fig.add_vline(x=0, line_color="#334155", line_width=1)
-        fig.update_layout(title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family=C["font"],size=12,color="#64748b"),x=0),
-                          **base_layout(bar_h), xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                          yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+        fig.update_layout(title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                          **base_layout(bar_h), xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                          yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"))
         st.plotly_chart(fig, use_container_width=True)
 
     with cb:
@@ -533,14 +644,14 @@ with tab_dash:
             x=sp.values, y=sp.index, orientation="h",
             marker_color=bar_colors(sp.values), marker_line_width=0,
             text=[f"{v:+.1f}%" for v in sp.values], textposition="outside",
-            textfont=dict(family=C["font"],size=11,color=C["text"]),
+            textfont=dict(family=C["font"],size=13,color=C["text"]),
             hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
         ))
         fig2.add_vline(x=0, line_color="#334155", line_width=1)
-        fig2.update_layout(title=dict(text=f"Avg by Sector — {period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+        fig2.update_layout(title=dict(text=f"Avg by Sector — {period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                            **base_layout(420,margin=dict(l=10,r=80,t=44,b=10)),
-                           xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                           yaxis=dict(showgrid=False,tickfont=dict(size=11)))
+                           xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                           yaxis=dict(showgrid=False,tickfont=dict(size=14)))
         st.plotly_chart(fig2, use_container_width=True)
 
     st.markdown('<div class="section-header">DISTRIBUTION & HEATMAPS</div>', unsafe_allow_html=True)
@@ -555,9 +666,9 @@ with tab_dash:
             fig3.add_vline(x=float(hv.mean()), line_color="#f59e0b", line_width=1, line_dash="dot",
                            annotation_text=f"avg {hv.mean():+.1f}%",
                            annotation_font=dict(color="#f59e0b",size=10,family=C["font"]))
-        fig3.update_layout(title=dict(text=f"Distribution — {period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
-                           **base_layout(340),xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                           yaxis=dict(showgrid=True,gridcolor=C["grid"],tickfont=dict(size=11)))
+        fig3.update_layout(title=dict(text=f"Distribution — {period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                           **base_layout(340),xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                           yaxis=dict(showgrid=True,gridcolor=C["grid"],tickfont=dict(size=14)))
         st.plotly_chart(fig3, use_container_width=True)
 
     with cc2:
@@ -572,13 +683,13 @@ with tab_dash:
             z=z, x=PERIODS, y=hdf["S"].tolist(),
             colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
             zmid=0, text=text_vals, texttemplate="%{text}",
-            textfont=dict(family=C["font"],size=10,color="#e2e8f0"),
+            textfont=dict(family=C["font"],size=16,color="#e2e8f0"),
             hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-            colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")),
-                          tickfont=dict(family=C["font"],size=10,color="#94a3b8"),
+            colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b")),
+                          tickfont=dict(family=C["font"],size=13,color="#94a3b8"),
                           ticksuffix="%",thickness=14,len=0.9,tickvals=[-100,-50,0,50,100]),
         ))
-        fig4.update_layout(title=dict(text="Multi-Period Heatmap — Top 20 by |YTD|",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+        fig4.update_layout(title=dict(text="Multi-Period Heatmap — Top 20 by |YTD|",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                            **base_layout(heat_h,margin=dict(l=10,r=80,t=44,b=10)),
                            xaxis=dict(showgrid=False,tickfont=dict(size=12,color="#94a3b8"),side="bottom"),
                            yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11,color="#e2e8f0")))
@@ -597,13 +708,13 @@ with tab_dash:
         z=z_sec_arr, x=PERIODS, y=y_sec,
         colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
         zmid=0, text=text_sec, texttemplate="%{text}",
-        textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
+        textfont=dict(family=C["font"],size=16,color="#e2e8f0"),
         hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-        colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")),
-                      tickfont=dict(family=C["font"],size=10,color="#94a3b8"),
+        colorbar=dict(title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b")),
+                      tickfont=dict(family=C["font"],size=13,color="#94a3b8"),
                       ticksuffix="%",thickness=14,len=0.9,tickvals=[-50,-25,0,25,50]),
     ))
-    fig_sh2.update_layout(title=dict(text="Sector Returns by Period (Avg & Median)",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+    fig_sh2.update_layout(title=dict(text="Sector Returns by Period (Avg & Median)",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                           **base_layout(sec_h,margin=dict(l=10,r=80,t=44,b=10)),
                           xaxis=dict(showgrid=False,tickfont=dict(size=12,color="#94a3b8")),
                           yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11,color="#e2e8f0")))
@@ -681,14 +792,14 @@ with tab_sector:
             x=bar_sec[sec_period], y=bar_sec["Label"].astype(str), orientation="h",
             marker_color=bar_colors(bar_sec[sec_period]), marker_line_width=0,
             text=[f"{v:+.1f}%" for v in bar_sec[sec_period]], textposition="outside",
-            textfont=dict(family=C["font"],size=11,color=C["text"]),
+            textfont=dict(family=C["font"],size=13,color=C["text"]),
             hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
         ))
         fig_sb.add_vline(x=0, line_color="#334155", line_width=1)
-        fig_sb.update_layout(title=dict(text=f"{sel_sector} — {sec_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+        fig_sb.update_layout(title=dict(text=f"{sel_sector} — {sec_period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                              **base_layout(max(300,len(bar_sec)*30+60)),
-                             xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                             yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+                             xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                             yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"))
         st.plotly_chart(fig_sb, use_container_width=True)
 
     with sc_b:
@@ -699,22 +810,22 @@ with tab_sector:
                 labels=["DR80" if k else "Pipeline" for k in type_counts.index],
                 values=type_counts.values, hole=0.55,
                 marker_colors=["#3b82f6","#f59e0b"],
-                textfont=dict(family=C["font"],size=12),
+                textfont=dict(family=C["font"],size=14),
                 hovertemplate="<b>%{label}</b><br>%{value}<br>%{percent}<extra></extra>",
             ))
             fp1.update_layout(**base_layout(280),
-                              legend=dict(font=dict(family=C["font"],size=11,color="#64748b")),
+                              legend=dict(font=dict(family=C["font"],size=13,color="#64748b")),
                               annotations=[dict(text=f"<b>{len(sec_df)}</b><br>total",x=0.5,y=0.5,
-                                                showarrow=False,font=dict(family=C["font"],size=13,color="#e2e8f0"))])
+                                                showarrow=False,font=dict(family=C["font"],size=16,color="#e2e8f0"))])
             st.plotly_chart(fp1, use_container_width=True)
         with pt2:
             qc2 = sec_df["Quarter"].value_counts().sort_index()
             if len(qc2):
                 fp2 = go.Figure(go.Pie(labels=qc2.index, values=qc2.values, hole=0.55,
                                        marker_colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"],
-                                       textfont=dict(family=C["font"],size=12),
+                                       textfont=dict(family=C["font"],size=14),
                                        hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
-                fp2.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=11,color="#64748b")))
+                fp2.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=13,color="#64748b")))
                 st.plotly_chart(fp2, use_container_width=True)
             else:
                 st.info("No pipeline securities in this sector.")
@@ -727,15 +838,15 @@ with tab_sector:
         z=z_s, x=PERIODS, y=heat_sec["Label"].astype(str).tolist(),
         colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
         zmid=0, text=text_hs, texttemplate="%{text}",
-        textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
+        textfont=dict(family=C["font"],size=16,color="#e2e8f0"),
         hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-        colorbar=dict(tickfont=dict(family=C["font"],size=10,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
-                      title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b"))),
+        colorbar=dict(tickfont=dict(family=C["font"],size=13,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
+                      title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b"))),
     ))
-    fig_sh.update_layout(title=dict(text=f"{sel_sector} — All Periods",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+    fig_sh.update_layout(title=dict(text=f"{sel_sector} — All Periods",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                          **base_layout(max(260,len(heat_sec)*28+60),margin=dict(l=10,r=80,t=44,b=10)),
-                         xaxis=dict(showgrid=False,tickfont=dict(size=12)),
-                         yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11)))
+                         xaxis=dict(showgrid=False,tickfont=dict(size=14)),
+                         yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=14)))
     st.plotly_chart(fig_sh, use_container_width=True)
 
     st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
@@ -770,31 +881,31 @@ with tab_pipeline:
             qc = pipe_df["Quarter"].value_counts().sort_index()
             fp = go.Figure(go.Pie(labels=qc.index, values=qc.values, hole=0.6,
                                   marker_colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"],
-                                  textfont=dict(family=C["font"],size=12),
+                                  textfont=dict(family=C["font"],size=14),
                                   hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
-            fp.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=11,color="#64748b")),
-                             title=dict(text="By Quarter",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+            fp.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=13,color="#64748b")),
+                             title=dict(text="By Quarter",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                              annotations=[dict(text=f"<b>{len(pipe_df)}</b><br>total",x=0.5,y=0.5,
-                                               showarrow=False,font=dict(family=C["font"],size=13,color="#e2e8f0"))])
+                                               showarrow=False,font=dict(family=C["font"],size=16,color="#e2e8f0"))])
             st.plotly_chart(fp, use_container_width=True)
         with p2:
             sc = pipe_df["Sector"].value_counts()
             fs = go.Figure(go.Pie(labels=sc.index, values=sc.values, hole=0.5,
-                                  textfont=dict(family=C["font"],size=11),
+                                  textfont=dict(family=C["font"],size=13),
                                   hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
-            fs.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=10,color="#64748b")),
-                             title=dict(text="By Sector",font=dict(family=C["font"],size=12,color="#64748b"),x=0))
+            fs.update_layout(**base_layout(280),legend=dict(font=dict(family=C["font"],size=13,color="#64748b")),
+                             title=dict(text="By Sector",font=dict(family=C["font"],size=15,color="#64748b"),x=0))
             st.plotly_chart(fs, use_container_width=True)
         with p3:
             qa = pipe_df.groupby("Quarter")["YTD"].mean().dropna().sort_index()
             fq = go.Figure(go.Bar(x=qa.index, y=qa.values, marker_color=bar_colors(qa.values),
                                   text=[f"{v:+.1f}%" for v in qa.values], textposition="outside",
-                                  textfont=dict(family=C["font"],size=11,color=C["text"])))
+                                  textfont=dict(family=C["font"],size=13,color=C["text"])))
             fq.add_hline(y=0, line_color="#334155", line_width=1)
             fq.update_layout(**base_layout(280,margin=dict(l=10,r=10,t=44,b=30)),
-                             title=dict(text="Avg YTD by Quarter",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
-                             xaxis=dict(showgrid=False,tickfont=dict(size=12)),
-                             yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)))
+                             title=dict(text="Avg YTD by Quarter",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
+                             xaxis=dict(showgrid=False,tickfont=dict(size=14)),
+                             yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)))
             st.plotly_chart(fq, use_container_width=True)
 
         st.markdown('<div class="section-header">POSITIONING — YTD vs 1Y</div>', unsafe_allow_html=True)
@@ -806,15 +917,15 @@ with tab_pipeline:
             fscat.add_trace(go.Scatter(x=grp["YTD"],y=grp["1Y"],mode="markers+text",name=sec,
                 marker=dict(color=sec_colors[i%len(sec_colors)],size=10,opacity=0.85),
                 text=grp["S"],textposition="top center",
-                textfont=dict(family=C["font"],size=10,color=C["text"]),
+                textfont=dict(family=C["font"],size=13,color=C["text"]),
                 hovertemplate="<b>%{text}</b><br>YTD: %{x:.1f}%<br>1Y: %{y:.1f}%<extra></extra>"))
         fscat.add_hline(y=0,line_color="#334155",line_width=1)
         fscat.add_vline(x=0,line_color="#334155",line_width=1)
-        fscat.update_layout(title=dict(text="Pipeline: YTD vs 1-Year",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+        fscat.update_layout(title=dict(text="Pipeline: YTD vs 1-Year",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                             **base_layout(420,margin=dict(l=10,r=10,t=44,b=60)),
-                            xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="YTD",tickfont=dict(size=11)),
-                            yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="1-Year",tickfont=dict(size=11)),
-                            legend=dict(font=dict(family=C["font"],size=10,color="#64748b"),orientation="h",y=-0.2))
+                            xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="YTD",tickfont=dict(size=14)),
+                            yaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",title="1-Year",tickfont=dict(size=14)),
+                            legend=dict(font=dict(family=C["font"],size=13,color="#64748b"),orientation="h",y=-0.2))
         st.plotly_chart(fscat, use_container_width=True)
 
         st.markdown('<div class="section-header">PIPELINE TABLE</div>', unsafe_allow_html=True)
@@ -879,13 +990,13 @@ Then re-upload the file.""")
                     x=pp2[comp_period], y=pp2["Label"].astype(str), orientation="h",
                     marker_color=bar_colors(pp2[comp_period]), marker_line_width=0,
                     text=[f"{v:+.1f}%" for v in pp2[comp_period]], textposition="outside",
-                    textfont=dict(family=C["font"],size=11),
+                    textfont=dict(family=C["font"],size=13),
                     hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>"))
                 fig_p.add_vline(x=0,line_color="#334155",line_width=1)
-                fig_p.update_layout(title=dict(text=f"DR80 — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+                fig_p.update_layout(title=dict(text=f"DR80 — {comp_period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                                     **base_layout(max(280,n_peers*32+80)),
-                                    xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                                    yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+                                    xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                                    yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"))
                 st.plotly_chart(fig_p, use_container_width=True)
             else:
                 st.info("No DR80 peers matched for this group.")
@@ -898,13 +1009,13 @@ Then re-upload the file.""")
                 x=cp2[comp_period], y=cp2["Label"].astype(str), orientation="h",
                 marker_color="#f59e0b", marker_line_width=0,
                 text=[f"{v:+.1f}%" for v in cp2[comp_period]], textposition="outside",
-                textfont=dict(family=C["font"],size=11),
+                textfont=dict(family=C["font"],size=13),
                 hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>"))
             fig_c.add_vline(x=0,line_color="#334155",line_width=1)
-            fig_c.update_layout(title=dict(text=f"Competitors — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+            fig_c.update_layout(title=dict(text=f"Competitors — {comp_period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                                 **base_layout(max(280,n_comp*32+80)),
-                                xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                                yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"))
+                                xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                                yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"))
             st.plotly_chart(fig_c, use_container_width=True)
 
         # ── Combined ranked chart ──────────────────────────────────────────────
@@ -918,17 +1029,17 @@ Then re-upload the file.""")
             x=combined[comp_period], y=combined["Label"].astype(str), orientation="h",
             marker_color=type_colors, marker_line_width=0,
             text=[f"{v:+.1f}%" for v in combined[comp_period]], textposition="outside",
-            textfont=dict(family=C["font"],size=11),
+            textfont=dict(family=C["font"],size=13),
             customdata=list(zip(combined["Type"],combined["Name"])),
             hovertemplate="<b>%{y}</b><br>%{customdata[0]}<br>%{customdata[1]}<br>%{x:.1f}%<extra></extra>"))
         for lbl, col in [("DR80","#3b82f6"),("Competitor","#f59e0b")]:
             fig_comb.add_trace(go.Bar(x=[None],y=[None],orientation="h",name=lbl,marker_color=col,showlegend=True))
         fig_comb.add_vline(x=0,line_color="#334155",line_width=1)
-        fig_comb.update_layout(title=dict(text=f"Combined Ranking — {comp_period}",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+        fig_comb.update_layout(title=dict(text=f"Combined Ranking — {comp_period}",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                                **base_layout(max(300,len(combined)*28+80),margin=dict(l=10,r=80,t=44,b=10)),
-                               xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=11)),
-                               yaxis=dict(showgrid=False,tickfont=dict(size=11),type="category"),
-                               legend=dict(font=dict(family=C["font"],size=11,color="#94a3b8"),bgcolor="rgba(0,0,0,0)",
+                               xaxis=dict(showgrid=True,gridcolor=C["grid"],ticksuffix="%",tickfont=dict(size=14)),
+                               yaxis=dict(showgrid=False,tickfont=dict(size=14),type="category"),
+                               legend=dict(font=dict(family=C["font"],size=13,color="#94a3b8"),bgcolor="rgba(0,0,0,0)",
                                            bordercolor="#1e2d4a",orientation="h",x=0,y=1.04),
                                barmode="relative")
         st.plotly_chart(fig_comb, use_container_width=True)
@@ -949,14 +1060,14 @@ Then re-upload the file.""")
             z=z_c, x=PERIODS, y=heat_all["Label"].astype(str).tolist(),
             colorscale=[[0.0,"#991b1b"],[0.3,"#7f1d1d"],[0.5,"#0f172a"],[0.7,"#064e3b"],[1.0,"#059669"]],
             zmid=0, text=text_c, texttemplate="%{text}",
-            textfont=dict(family=C["font"],size=11,color="#e2e8f0"),
+            textfont=dict(family=C["font"],size=16,color="#e2e8f0"),
             hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
-            colorbar=dict(tickfont=dict(family=C["font"],size=10,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
-                          title=dict(text="Return %",font=dict(family=C["font"],size=10,color="#64748b")))))
-        fig_ch.update_layout(title=dict(text=f"{sel_group} — DR80 vs Competitors",font=dict(family=C["font"],size=12,color="#64748b"),x=0),
+            colorbar=dict(tickfont=dict(family=C["font"],size=13,color="#94a3b8"),ticksuffix="%",thickness=14,len=0.9,
+                          title=dict(text="Return %",font=dict(family=C["font"],size=13,color="#64748b")))))
+        fig_ch.update_layout(title=dict(text=f"{sel_group} — DR80 vs Competitors",font=dict(family=C["font"],size=15,color="#64748b"),x=0),
                              **base_layout(max(280,len(heat_all)*26+60),margin=dict(l=10,r=80,t=44,b=10)),
-                             xaxis=dict(showgrid=False,tickfont=dict(size=12)),
-                             yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11)))
+                             xaxis=dict(showgrid=False,tickfont=dict(size=14)),
+                             yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=14)))
         st.plotly_chart(fig_ch, use_container_width=True)
 
         # ── Competitor table ───────────────────────────────────────────────────
