@@ -1,648 +1,728 @@
+"""
+DR80 Tracking Dashboard
+KTB Securities — Depositary Receipt Operations
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import warnings
-warnings.filterwarnings('ignore')
+import io, os, warnings
+from datetime import datetime, timedelta
+
+warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="DR80 Tracking Dashboard",
+    page_title="DR80 Dashboard",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ──────────────────────────────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
-
-.stApp {
-    background: #0a0e1a;
-    color: #e2e8f0;
-}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background: #0d1221 !important;
-    border-right: 1px solid #1e2d4a;
-}
-section[data-testid="stSidebar"] * {
-    color: #94a3b8 !important;
-}
-section[data-testid="stSidebar"] .stSelectbox label,
-section[data-testid="stSidebar"] .stMultiSelect label {
-    color: #64748b !important;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-family: 'IBM Plex Mono', monospace;
-}
-
-/* Metric cards */
-.metric-card {
-    background: linear-gradient(135deg, #111827 0%, #0f1729 100%);
-    border: 1px solid #1e2d4a;
-    border-radius: 8px;
-    padding: 16px 20px;
-    margin-bottom: 8px;
-    position: relative;
-    overflow: hidden;
-}
-.metric-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0;
-    width: 3px; height: 100%;
-    background: #3b82f6;
-}
-.metric-card.green::before { background: #10b981; }
-.metric-card.red::before { background: #ef4444; }
-.metric-card.yellow::before { background: #f59e0b; }
-
-.metric-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #475569;
-    margin-bottom: 4px;
-}
-.metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: #e2e8f0;
-}
-.metric-sub {
-    font-size: 0.75rem;
-    color: #64748b;
-    margin-top: 2px;
-}
-
-/* Section headers */
-.section-header {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #3b82f6;
-    border-bottom: 1px solid #1e2d4a;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-    margin-top: 24px;
-}
-
-/* Positive/negative colors */
-.pos { color: #10b981 !important; }
-.neg { color: #ef4444 !important; }
-
-/* Pill badge */
-.badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 9999px;
-    font-size: 0.7rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.badge-blue { background: rgba(59,130,246,0.15); color: #60a5fa; border: 1px solid rgba(59,130,246,0.3); }
-.badge-green { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }
-.badge-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
-
-/* Title */
-.dashboard-title {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.4rem;
-    font-weight: 600;
-    color: #e2e8f0;
-    letter-spacing: -0.02em;
-}
-.dashboard-sub {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.7rem;
-    color: #334155;
-    letter-spacing: 0.05em;
-}
-
-/* Plotly chart background fix */
-.js-plotly-plot .plotly .bg { fill: transparent !important; }
-
-/* Streamlit elements */
-div[data-testid="stMetric"] {
-    background: #111827;
-    border: 1px solid #1e2d4a;
-    border-radius: 8px;
-    padding: 12px 16px;
-}
-div[data-testid="stMetric"] label { color: #64748b !important; font-size: 0.75rem; }
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] { color: #e2e8f0 !important; font-family: 'IBM Plex Mono', monospace; }
-
-/* Dataframe */
-.dataframe { font-size: 0.82rem; }
-
-/* Multiselect tags */
-.stMultiSelect span[data-baseweb="tag"] {
-    background: rgba(59,130,246,0.2) !important;
-    border: 1px solid rgba(59,130,246,0.4) !important;
-    color: #93c5fd !important;
-}
-
-hr { border-color: #1e2d4a; }
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+.stApp { background: #0a0e1a; color: #e2e8f0; }
+section[data-testid="stSidebar"] { background: #0d1221 !important; border-right: 1px solid #1e2d4a; }
+section[data-testid="stSidebar"] * { color: #94a3b8 !important; }
+.metric-card { background: linear-gradient(135deg,#111827,#0f1729); border:1px solid #1e2d4a; border-radius:8px; padding:16px 20px; margin-bottom:8px; position:relative; overflow:hidden; }
+.metric-card::before { content:''; position:absolute; top:0; left:0; width:3px; height:100%; background:#3b82f6; }
+.metric-card.green::before { background:#10b981; }
+.metric-card.red::before { background:#ef4444; }
+.metric-label { font-family:'IBM Plex Mono',monospace; font-size:0.65rem; text-transform:uppercase; letter-spacing:0.1em; color:#475569; margin-bottom:4px; }
+.metric-value { font-family:'IBM Plex Mono',monospace; font-size:1.5rem; font-weight:600; color:#e2e8f0; }
+.metric-sub { font-size:0.75rem; color:#64748b; margin-top:2px; }
+.section-header { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.12em; color:#3b82f6; border-bottom:1px solid #1e2d4a; padding-bottom:8px; margin-bottom:16px; margin-top:24px; }
+.dashboard-title { font-family:'IBM Plex Mono',monospace; font-size:1.4rem; font-weight:600; color:#e2e8f0; letter-spacing:-0.02em; }
+.dashboard-sub { font-family:'IBM Plex Mono',monospace; font-size:0.7rem; color:#334155; letter-spacing:0.05em; }
+.stMultiSelect span[data-baseweb="tag"] { background:rgba(59,130,246,0.2)!important; border:1px solid rgba(59,130,246,0.4)!important; color:#93c5fd!important; }
+hr { border-color:#1e2d4a; }
+.stButton > button { background:#1e2d4a; color:#94a3b8; border:1px solid #2d3f5e; border-radius:6px; font-family:'IBM Plex Mono',monospace; font-size:0.75rem; }
+.stButton > button:hover { background:#2d3f5e; color:#e2e8f0; border-color:#3b82f6; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constants ──────────────────────────────────────────────────────────────────
+PERIODS = ["YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"]
+SECTORS = [
+    "Semiconductor/ AI", "Techonology", "Precious Metal",
+    "Energy", "Consumer discretionary", "Consumer defensive",
+    "Defense", "ETF"
+]
+DEFAULT_FILE = "DR80_Tracking.xlsx"
 
-# ── Data Loading ─────────────────────────────────────────────────────────────
-@st.cache_data
-def load_data():
-    df_raw = pd.read_excel("DR80_Tracking.xlsx", sheet_name="Current DR80", header=None)
 
-    PERIODS = ["YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"]
+# ── Ticker conversion ──────────────────────────────────────────────────────────
+def bbg_to_yahoo(bbg: str):
+    t = bbg.strip()
+    parts = t.rsplit(" ", 2)
+    if len(parts) < 3 or parts[2].upper() != "EQUITY":
+        return t or None
+    code, exch = parts[0].strip(), parts[1].strip().upper()
+    if exch == "TB":
+        return None  # Thai DRs not on Yahoo
+    if exch == "US":
+        return code
+    if exch == "HK":
+        try:
+            return f"{int(code):04d}.HK"
+        except ValueError:
+            return f"{code}.HK"
+    if exch == "JP":
+        return f"{code}.T"
+    if exch == "CH":
+        try:
+            int(code)
+            return f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
+        except ValueError:
+            return f"{code}.SS"
+    mapping = {"SP": ".SI", "LN": ".L", "FP": ".PA", "GR": ".DE", "AU": ".AX"}
+    suffix = mapping.get(exch, "")
+    return f"{code}{suffix}" if suffix else code
 
+
+def short_ticker(bbg: str) -> str:
+    for suffix in [" TB Equity", " US Equity", " HK Equity", " JP Equity",
+                   " CH Equity", " SP Equity", " LN Equity", " FP Equity",
+                   " GR Equity", " AU Equity"]:
+        bbg = bbg.replace(suffix, "")
+    return bbg.strip()
+
+
+# ── Excel parsing ──────────────────────────────────────────────────────────────
+def parse_excel(file_obj) -> pd.DataFrame:
+    df_raw = pd.read_excel(file_obj, sheet_name="Current DR80", header=None)
     records = []
     current_sector = "Unknown"
-
-    # Detect sector rows and data rows
-    for i, row in df_raw.iterrows():
-        col0 = row[0]
-        col1 = str(row[1]) if pd.notna(row[1]) else ""
-        col2 = str(row[2]) if pd.notna(row[2]) else ""
-        col3 = str(row[3]) if pd.notna(row[3]) else ""
-
-        # Sector header row: col0 is NaN, col1 is sector name, col2 is 'name'
-        if pd.isna(col0) and col2 == "name" and col1 not in ["", "nan"]:
-            current_sector = col1.strip()
+    for _, row in df_raw.iterrows():
+        c0 = row[0]
+        c1 = str(row[1]) if pd.notna(row[1]) else ""
+        c2 = str(row[2]) if pd.notna(row[2]) else ""
+        c3 = str(row[3]) if pd.notna(row[3]) else ""
+        if pd.isna(c0) and c2 == "name" and c1 not in ["", "nan"]:
+            current_sector = c1.strip()
             continue
-
-        # Skip header/empty rows
-        if col1 in ["", "nan"] or col2 in ["", "nan", "id", "name"]:
+        if c1 in ["", "nan"] or c2 in ["", "nan", "id", "name"] or c1.startswith("Unnamed"):
             continue
-        if col1.startswith("Unnamed"):
-            continue
-
-        # Get ticker — col1 is ticker, col2 is name
-        ticker = col1.strip()
-        name = col2.strip()
-
-        # Quarter (pipeline) field
-        quarter = col3.strip() if col3 not in ["nan", ""] else None
-
         perf = {}
-        for j, period in enumerate(PERIODS):
-            val = row[4 + j]
-            perf[period] = float(val) if pd.notna(val) else None
-
-        # Is this a current DR80?
-        is_current_dr = ticker.endswith("80 TB Equity")
-
+        for j, p in enumerate(PERIODS):
+            v = row[4 + j] if (4 + j) < len(row) else None
+            perf[p] = float(v) if pd.notna(v) else None
         records.append({
-            "Ticker": ticker,
-            "Name": name,
+            "BBG_Ticker": c1.strip(),
+            "Yahoo_Ticker": bbg_to_yahoo(c1.strip()),
+            "Name": c2.strip(),
             "Sector": current_sector,
-            "Quarter": quarter,
-            "Is_DR80": is_current_dr,
-            **perf
+            "Quarter": c3.strip() if c3 not in ["nan", ""] else None,
+            "Is_DR80": c1.strip().endswith("80 TB Equity"),
+            **perf,
         })
-
     return pd.DataFrame(records)
 
 
-# ── Load & Filter Logic ───────────────────────────────────────────────────────
-df = load_data()
+# ── Yahoo Finance fetch ────────────────────────────────────────────────────────
+def fetch_returns_yahoo(tickers: list) -> dict:
+    try:
+        import yfinance as yf
+    except ImportError:
+        st.error("yfinance not installed. Run: pip install yfinance")
+        return {}
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+    today = datetime.today()
+    start = (today - timedelta(days=365 * 5 + 30)).strftime("%Y-%m-%d")
+    valid = [t for t in tickers if t]
+    if not valid:
+        return {}
+
+    progress = st.progress(0, text="Connecting to Yahoo Finance...")
+    try:
+        raw = yf.download(valid, start=start, end=today.strftime("%Y-%m-%d"),
+                          auto_adjust=True, progress=False)
+        prices = raw["Close"] if "Close" in raw.columns else raw
+    except Exception as e:
+        st.error(f"Download failed: {e}")
+        progress.empty()
+        return {}
+
+    def pct_chg(series, from_dt):
+        s = series.dropna()
+        idx = s.index.searchsorted(pd.Timestamp(from_dt))
+        if idx >= len(s):
+            return None
+        sp, ep = s.iloc[idx], s.iloc[-1]
+        return (ep / sp - 1) * 100 if sp != 0 else None
+
+    period_offsets = {
+        "YTD": datetime(today.year, 1, 1),
+        "1M":  today - timedelta(days=30),
+        "3M":  today - timedelta(days=91),
+        "6M":  today - timedelta(days=182),
+        "1Y":  today - timedelta(days=365),
+        "3Y":  today - timedelta(days=365 * 3),
+        "5Y":  today - timedelta(days=365 * 5),
+    }
+
+    results = {}
+    for i, ticker in enumerate(valid):
+        progress.progress((i + 1) / len(valid), text=f"Processing {ticker}…")
+        try:
+            s = prices[ticker] if (isinstance(prices, pd.DataFrame) and ticker in prices.columns) else prices
+            results[ticker] = {p: pct_chg(s, dt) for p, dt in period_offsets.items()}
+        except Exception:
+            results[ticker] = {p: None for p in PERIODS}
+
+    progress.empty()
+    return results
+
+
+def fetch_single(yahoo_ticker: str) -> dict:
+    """Fetch return data for a single ticker."""
+    res = fetch_returns_yahoo([yahoo_ticker])
+    return res.get(yahoo_ticker, {p: None for p in PERIODS})
+
+
+# ── Write back Excel ───────────────────────────────────────────────────────────
+def write_excel(original_bytes: bytes, df: pd.DataFrame) -> bytes:
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(original_bytes))
+    ws = wb["Current DR80"]
+
+    raw = pd.read_excel(io.BytesIO(original_bytes), sheet_name="Current DR80", header=None)
+    df_idx = df.set_index("BBG_Ticker")
+    sector_last = {}
+    current_sector = None
+    original_bbg = set()
+
+    for i, row in raw.iterrows():
+        c1 = str(row[1]) if pd.notna(row[1]) else ""
+        c2 = str(row[2]) if pd.notna(row[2]) else ""
+        if c2 == "name" and c1 not in ["", "nan"] and pd.isna(row[0]):
+            current_sector = c1.strip()
+            continue
+        if c1 in ["", "nan"] or c1.startswith("Unnamed"):
+            continue
+        bbg = c1.strip()
+        original_bbg.add(bbg)
+        if current_sector:
+            sector_last[current_sector] = i + 1  # 1-indexed
+        # Update return cells
+        if bbg in df_idx.index:
+            rec = df_idx.loc[bbg]
+            for j, p in enumerate(PERIODS):
+                v = rec[p]
+                ws.cell(row=i + 1, column=5 + j).value = round(float(v), 6) if pd.notna(v) and v is not None else None
+
+    # Append new pipeline rows
+    new_rows = df[~df["BBG_Ticker"].isin(original_bbg) & ~df["Is_DR80"]]
+    for _, rec in new_rows.iterrows():
+        sector = rec["Sector"]
+        insert_after = sector_last.get(sector, ws.max_row)
+        ws.insert_rows(insert_after + 1)
+        nr = insert_after + 1
+        code = rec["BBG_Ticker"].rsplit(" ", 2)[0].strip()
+        ws.cell(row=nr, column=1).value = code
+        ws.cell(row=nr, column=2).value = rec["BBG_Ticker"]
+        ws.cell(row=nr, column=3).value = rec["Name"]
+        ws.cell(row=nr, column=4).value = rec["Quarter"]
+        for j, p in enumerate(PERIODS):
+            v = rec[p]
+            ws.cell(row=nr, column=5 + j).value = round(float(v), 6) if pd.notna(v) and v is not None else None
+        sector_last[sector] = nr  # stack subsequent inserts
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ── Chart helpers ──────────────────────────────────────────────────────────────
+C = {"bg": "rgba(0,0,0,0)", "grid": "#1e2d4a", "text": "#94a3b8",
+     "pos": "#10b981", "neg": "#ef4444", "blue": "#3b82f6", "font": "IBM Plex Mono"}
+
+def base_layout(h=350, margin=None):
+    m = margin or dict(l=10, r=10, t=40, b=10)
+    return dict(paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
+                font=dict(family=C["font"], color=C["text"], size=9),
+                height=h, margin=m)
+
+def fmt_pct(v, d=1):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    return f"+{v:.{d}f}%" if v >= 0 else f"{v:.{d}f}%"
+
+def style_pct(v):
+    if pd.isna(v): return "color:#475569"
+    return f"color:{C['pos']}" if v >= 0 else f"color:{C['neg']}"
+
+def bar_colors(vals):
+    return [C["pos"] if v >= 0 else C["neg"] for v in vals]
+
+
+# ── Session state ──────────────────────────────────────────────────────────────
+for key, default in [("df", None), ("excel_bytes", None),
+                     ("last_refresh", None), ("source_label", None)]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# Auto-load default file
+if st.session_state.df is None and os.path.exists(DEFAULT_FILE):
+    with open(DEFAULT_FILE, "rb") as f:
+        b = f.read()
+    st.session_state.excel_bytes = b
+    st.session_state.df = parse_excel(io.BytesIO(b))
+    st.session_state.source_label = DEFAULT_FILE
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.65rem;color:#334155;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:20px;">DR80 DASHBOARD v1.0</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#334155;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:16px;">DR80 DASHBOARD · KTB Securities</div>', unsafe_allow_html=True)
 
-    st.markdown("**UNIVERSE**")
-    universe_opt = st.radio(
-        "",
-        ["All", "Current DR80 Only", "Pipeline Only"],
-        horizontal=False,
-        label_visibility="collapsed"
-    )
+    # Upload
+    st.markdown("**📂 DATA SOURCE**")
+    uploaded = st.file_uploader("Upload Excel", type=["xlsx"], label_visibility="collapsed")
+    if uploaded:
+        b = uploaded.read()
+        st.session_state.excel_bytes = b
+        st.session_state.df = parse_excel(io.BytesIO(b))
+        st.session_state.source_label = uploaded.name
+        st.session_state.last_refresh = None
+        st.success(f"✓ Loaded {uploaded.name}")
 
-    st.markdown("---")
-    st.markdown("**SECTORS**")
-    all_sectors = sorted(df["Sector"].unique())
-    selected_sectors = st.multiselect(
-        "Filter sectors",
-        options=all_sectors,
-        default=all_sectors,
-        label_visibility="collapsed"
-    )
+    if st.session_state.source_label:
+        st.caption(f"Source: {st.session_state.source_label}")
+    if st.session_state.last_refresh:
+        st.caption(f"Last refresh: {st.session_state.last_refresh}")
 
     st.markdown("---")
-    st.markdown("**PIPELINE QUARTER**")
-    pipeline_quarters = sorted([q for q in df["Quarter"].dropna().unique()])
-    selected_quarters = st.multiselect(
-        "Filter quarters",
-        options=pipeline_quarters,
-        default=pipeline_quarters,
-        label_visibility="collapsed"
-    )
+
+    # Refresh
+    st.markdown("**🔄 REFRESH DATA**")
+    st.caption("Fetches live returns from Yahoo Finance for all non-TB securities.")
+    if st.button("⟳ Refresh from Yahoo Finance", use_container_width=True):
+        if st.session_state.df is None:
+            st.error("Load a file first.")
+        else:
+            df_curr = st.session_state.df.copy()
+            fetchable = df_curr[df_curr["Yahoo_Ticker"].notna()][["BBG_Ticker", "Yahoo_Ticker"]].drop_duplicates()
+            fetched = fetch_returns_yahoo(fetchable["Yahoo_Ticker"].tolist())
+            ymap = dict(zip(fetchable["Yahoo_Ticker"], fetchable["BBG_Ticker"]))
+            n = 0
+            for yticker, rets in fetched.items():
+                bbg = ymap.get(yticker)
+                if bbg is None: continue
+                mask = df_curr["BBG_Ticker"] == bbg
+                for p in PERIODS:
+                    if rets.get(p) is not None:
+                        df_curr.loc[mask, p] = rets[p]
+                n += 1
+            st.session_state.df = df_curr
+            st.session_state.last_refresh = datetime.now().strftime("%Y-%m-%d %H:%M")
+            st.success(f"✓ Updated {n} securities")
 
     st.markdown("---")
-    st.markdown("**PERFORMANCE PERIOD**")
-    period = st.select_slider(
-        "Return period",
-        options=["YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"],
-        value="YTD",
-        label_visibility="collapsed"
-    )
 
-    st.markdown("---")
-    st.markdown("**RETURN RANGE**")
-    valid_vals = df[period].dropna()
-    min_val, max_val = float(valid_vals.min()), float(valid_vals.max())
-    ret_range = st.slider(
-        "Range (%)",
-        min_value=round(min_val, 0),
-        max_value=round(max_val, 0),
-        value=(round(min_val, 0), round(max_val, 0)),
-        label_visibility="collapsed"
-    )
+    # Filters (only if data loaded)
+    if st.session_state.df is not None:
+        df_all = st.session_state.df
 
-    st.markdown("---")
-    st.markdown("**SEARCH**")
-    search = st.text_input("Ticker or name", placeholder="e.g. NVDA, Apple...", label_visibility="collapsed")
+        st.markdown("**FILTERS**")
+        universe = st.radio("Universe", ["All", "DR80 Only", "Pipeline Only"], label_visibility="collapsed")
+
+        all_sectors = sorted(df_all["Sector"].unique())
+        sel_sectors = st.multiselect("Sectors", all_sectors, default=all_sectors, label_visibility="collapsed",
+                                     placeholder="All sectors")
+
+        all_qtrs = sorted([q for q in df_all["Quarter"].dropna().unique()])
+        sel_qtrs = st.multiselect("Pipeline quarters", all_qtrs, default=all_qtrs, label_visibility="collapsed",
+                                  placeholder="All quarters")
+
+        period = st.select_slider("Period", PERIODS, value="YTD", label_visibility="collapsed")
+
+        valid_p = df_all[period].dropna()
+        if len(valid_p):
+            mn, mx = float(valid_p.min()), float(valid_p.max())
+            ret_range = st.slider("Return range (%)", min_value=round(mn), max_value=round(mx),
+                                  value=(round(mn), round(mx)), label_visibility="collapsed")
+        else:
+            ret_range = (-500, 1000)
+
+        search = st.text_input("🔍 Search", placeholder="Ticker or name…", label_visibility="collapsed")
 
 
-# ── Apply filters ─────────────────────────────────────────────────────────────
-filtered = df.copy()
+# ── No data ────────────────────────────────────────────────────────────────────
+if st.session_state.df is None:
+    st.markdown('<div class="dashboard-title">DR80 TRACKING DASHBOARD</div>', unsafe_allow_html=True)
+    st.info("Upload a `DR80_Tracking.xlsx` file in the sidebar to get started.")
+    st.stop()
 
-if universe_opt == "Current DR80 Only":
-    filtered = filtered[filtered["Is_DR80"]]
-elif universe_opt == "Pipeline Only":
-    filtered = filtered[~filtered["Is_DR80"]]
 
-if selected_sectors:
-    filtered = filtered[filtered["Sector"].isin(selected_sectors)]
+# ── Apply filters ──────────────────────────────────────────────────────────────
+df_all = st.session_state.df.copy()
+filt = df_all.copy()
 
-# For pipeline quarter filter — only restrict non-DR80 rows
-pipeline_mask = (filtered["Is_DR80"]) | (filtered["Quarter"].isin(selected_quarters))
-filtered = filtered[pipeline_mask]
+if universe == "DR80 Only":
+    filt = filt[filt["Is_DR80"]]
+elif universe == "Pipeline Only":
+    filt = filt[~filt["Is_DR80"]]
 
-# Return range filter
-filtered = filtered[
-    (filtered[period].isna()) |
-    ((filtered[period] >= ret_range[0]) & (filtered[period] <= ret_range[1]))
-]
+if sel_sectors:
+    filt = filt[filt["Sector"].isin(sel_sectors)]
+
+# Quarter filter only applies to pipeline rows
+filt = filt[filt["Is_DR80"] | filt["Quarter"].isin(sel_qtrs)]
+
+filt = filt[filt[period].isna() | ((filt[period] >= ret_range[0]) & (filt[period] <= ret_range[1]))]
 
 if search:
     s = search.lower()
-    filtered = filtered[
-        filtered["Ticker"].str.lower().str.contains(s, na=False) |
-        filtered["Name"].str.lower().str.contains(s, na=False)
-    ]
+    filt = filt[filt["BBG_Ticker"].str.lower().str.contains(s, na=False) |
+                filt["Name"].str.lower().str.contains(s, na=False)]
 
 
-# ── Helper: color scale ────────────────────────────────────────────────────────
-def color_val(v):
-    if v is None or np.isnan(v): return "#475569"
-    return "#10b981" if v >= 0 else "#ef4444"
-
-def fmt_pct(v, decimals=1):
-    if v is None or (isinstance(v, float) and np.isnan(v)): return "—"
-    return f"+{v:.{decimals}f}%" if v >= 0 else f"{v:.{decimals}f}%"
+# ══════════════════════════════════════════════════════════════════════════════
+# TABS
+# ══════════════════════════════════════════════════════════════════════════════
+tab_dash, tab_pipeline, tab_add = st.tabs(["📊  Dashboard", "🔭  Pipeline", "➕  Add Security"])
 
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-col_t, col_r = st.columns([3, 1])
-with col_t:
-    st.markdown('<div class="dashboard-title">DR80 TRACKING DASHBOARD</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dashboard-sub">KRUNGTHAI BANK SECURITIES — DEPOSITARY RECEIPT OPERATIONS</div>', unsafe_allow_html=True)
-with col_r:
-    st.markdown(f'<div style="text-align:right;font-family:IBM Plex Mono;font-size:0.65rem;color:#334155;margin-top:8px;">SHOWING {len(filtered)} / {len(df)} SECURITIES<br>PERIOD: <span style="color:#3b82f6">{period}</span></div>', unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — DASHBOARD
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_dash:
+    ct, ci = st.columns([3, 1])
+    with ct:
+        st.markdown('<div class="dashboard-title">DR80 TRACKING</div>', unsafe_allow_html=True)
+        st.markdown('<div class="dashboard-sub">KTB SECURITIES · DEPOSITARY RECEIPT OPERATIONS</div>', unsafe_allow_html=True)
+    with ci:
+        st.markdown(f'<div style="text-align:right;font-family:IBM Plex Mono;font-size:0.65rem;color:#334155;margin-top:8px;">SHOWING {len(filt)} / {len(df_all)}<br>PERIOD: <span style="color:#3b82f6">{period}</span></div>', unsafe_allow_html=True)
 
-st.markdown("---")
+    st.markdown("---")
 
-# ── KPI Row ────────────────────────────────────────────────────────────────────
-k1, k2, k3, k4, k5 = st.columns(5)
+    # KPIs
+    pv = filt[period].dropna()
+    pos_n = int((pv >= 0).sum())
+    neg_n = int((pv < 0).sum())
+    avg_r = float(pv.mean()) if len(pv) else 0.0
+    hit_r = pos_n / len(pv) * 100 if len(pv) else 0.0
+    best = filt.loc[filt[period].idxmax()] if len(pv) else None
+    worst = filt.loc[filt[period].idxmin()] if len(pv) else None
 
-period_vals = filtered[period].dropna()
-positive_count = (period_vals >= 0).sum()
-negative_count = (period_vals < 0).sum()
-avg_ret = period_vals.mean() if len(period_vals) > 0 else 0
-best = filtered.loc[filtered[period].idxmax()] if len(period_vals) > 0 else None
-worst = filtered.loc[filtered[period].idxmin()] if len(period_vals) > 0 else None
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.markdown(f"""<div class="metric-card"><div class="metric-label">Securities</div>
+        <div class="metric-value">{len(filt)}</div>
+        <div class="metric-sub">DR80: {filt['Is_DR80'].sum()} · Pipeline: {(~filt['Is_DR80']).sum()}</div></div>""", unsafe_allow_html=True)
+    with k2:
+        cc = "green" if avg_r >= 0 else "red"
+        vc = C["pos"] if avg_r >= 0 else C["neg"]
+        st.markdown(f"""<div class="metric-card {cc}"><div class="metric-label">Avg Return ({period})</div>
+        <div class="metric-value" style="color:{vc}">{fmt_pct(avg_r)}</div>
+        <div class="metric-sub">{pos_n} pos · {neg_n} neg</div></div>""", unsafe_allow_html=True)
+    with k3:
+        bv = best[period] if best is not None else None
+        bt = short_ticker(best["BBG_Ticker"]) if best is not None else "—"
+        st.markdown(f"""<div class="metric-card green"><div class="metric-label">Best ({period})</div>
+        <div class="metric-value" style="color:#10b981">{fmt_pct(bv)}</div>
+        <div class="metric-sub">{bt}</div></div>""", unsafe_allow_html=True)
+    with k4:
+        wv = worst[period] if worst is not None else None
+        wt = short_ticker(worst["BBG_Ticker"]) if worst is not None else "—"
+        st.markdown(f"""<div class="metric-card red"><div class="metric-label">Worst ({period})</div>
+        <div class="metric-value" style="color:#ef4444">{fmt_pct(wv)}</div>
+        <div class="metric-sub">{wt}</div></div>""", unsafe_allow_html=True)
+    with k5:
+        st.markdown(f"""<div class="metric-card"><div class="metric-label">Win Rate</div>
+        <div class="metric-value">{hit_r:.0f}%</div>
+        <div class="metric-sub">+ve return for {period}</div></div>""", unsafe_allow_html=True)
 
-with k1:
-    st.markdown(f"""<div class="metric-card">
-    <div class="metric-label">Total Securities</div>
-    <div class="metric-value">{len(filtered)}</div>
-    <div class="metric-sub">DR80: {filtered['Is_DR80'].sum()} | Pipeline: {(~filtered['Is_DR80']).sum()}</div>
-    </div>""", unsafe_allow_html=True)
+    # Charts row 1
+    st.markdown('<div class="section-header">PERFORMANCE</div>', unsafe_allow_html=True)
+    ca, cb = st.columns([3, 2])
 
-with k2:
-    color_class = "green" if avg_ret >= 0 else "red"
-    st.markdown(f"""<div class="metric-card {color_class}">
-    <div class="metric-label">Avg Return ({period})</div>
-    <div class="metric-value" style="color:{'#10b981' if avg_ret>=0 else '#ef4444'}">{fmt_pct(avg_ret)}</div>
-    <div class="metric-sub">{positive_count} positive · {negative_count} negative</div>
-    </div>""", unsafe_allow_html=True)
-
-with k3:
-    st.markdown(f"""<div class="metric-card green">
-    <div class="metric-label">Best Performer</div>
-    <div class="metric-value" style="color:#10b981">{fmt_pct(best[period]) if best is not None else '—'}</div>
-    <div class="metric-sub">{best['Ticker'].replace(' TB Equity','').replace(' US Equity','').replace(' HK Equity','').replace(' CH Equity','').replace(' JP Equity','') if best is not None else '—'}</div>
-    </div>""", unsafe_allow_html=True)
-
-with k4:
-    st.markdown(f"""<div class="metric-card red">
-    <div class="metric-label">Worst Performer</div>
-    <div class="metric-value" style="color:#ef4444">{fmt_pct(worst[period]) if worst is not None else '—'}</div>
-    <div class="metric-sub">{worst['Ticker'].replace(' TB Equity','').replace(' US Equity','').replace(' HK Equity','').replace(' CH Equity','').replace(' JP Equity','') if worst is not None else '—'}</div>
-    </div>""", unsafe_allow_html=True)
-
-with k5:
-    hit_rate = (positive_count / len(period_vals) * 100) if len(period_vals) > 0 else 0
-    st.markdown(f"""<div class="metric-card">
-    <div class="metric-label">Win Rate</div>
-    <div class="metric-value">{hit_rate:.0f}%</div>
-    <div class="metric-sub">Securities with positive {period} return</div>
-    </div>""", unsafe_allow_html=True)
-
-# ── Charts Row 1 ──────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">PERFORMANCE OVERVIEW</div>', unsafe_allow_html=True)
-
-chart_cols = st.columns([3, 2])
-
-with chart_cols[0]:
-    # Horizontal bar chart - top & bottom performers
-    plot_df = filtered[["Ticker", "Name", "Sector", "Is_DR80", period]].dropna(subset=[period]).copy()
-    plot_df["ShortTicker"] = plot_df["Ticker"].str.replace(r"\s+(TB|US|HK|CH|JP)\s+Equity", "", regex=True)
-    plot_df = plot_df.sort_values(period, ascending=False)
-
-    n_show = min(30, len(plot_df))
-    # Take top N/2 and bottom N/2
-    half = n_show // 2
-    top_df = plot_df.head(half)
-    bot_df = plot_df.tail(half)
-    bar_df = pd.concat([top_df, bot_df]).drop_duplicates().sort_values(period)
-
-    fig_bar = go.Figure()
-    colors = ["#10b981" if v >= 0 else "#ef4444" for v in bar_df[period]]
-    fig_bar.add_trace(go.Bar(
-        x=bar_df[period],
-        y=bar_df["ShortTicker"],
-        orientation='h',
-        marker_color=colors,
-        marker_line_width=0,
-        hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>Return: %{x:.1f}%<extra></extra>",
-        customdata=list(zip(bar_df["ShortTicker"], bar_df["Name"]))
-    ))
-    fig_bar.add_vline(x=0, line_color="#334155", line_width=1)
-    fig_bar.update_layout(
-        title=dict(text=f"Top & Bottom Performers — {period}", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-        height=420,
-        margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(showgrid=True, gridcolor="#1e2d4a", zeroline=False, ticksuffix="%", title=""),
-        yaxis=dict(showgrid=False, title=""),
-        showlegend=False,
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-with chart_cols[1]:
-    # Sector average returns donut/bar
-    sector_perf = (
-        filtered.groupby("Sector")[period]
-        .mean()
-        .dropna()
-        .sort_values(ascending=True)
-    )
-
-    fig_sec = go.Figure()
-    colors_sec = ["#10b981" if v >= 0 else "#ef4444" for v in sector_perf.values]
-    fig_sec.add_trace(go.Bar(
-        x=sector_perf.values,
-        y=sector_perf.index,
-        orientation="h",
-        marker_color=colors_sec,
-        marker_line_width=0,
-        hovertemplate="<b>%{y}</b><br>Avg Return: %{x:.1f}%<extra></extra>",
-        text=[f"{v:+.1f}%" for v in sector_perf.values],
-        textposition="outside",
-        textfont=dict(family="IBM Plex Mono", size=9, color="#94a3b8")
-    ))
-    fig_sec.add_vline(x=0, line_color="#334155", line_width=1)
-    fig_sec.update_layout(
-        title=dict(text=f"Avg Return by Sector — {period}", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-        height=420,
-        margin=dict(l=10, r=80, t=40, b=10),
-        xaxis=dict(showgrid=True, gridcolor="#1e2d4a", zeroline=False, ticksuffix="%", title=""),
-        yaxis=dict(showgrid=False, title=""),
-        showlegend=False,
-    )
-    st.plotly_chart(fig_sec, use_container_width=True)
-
-
-# ── Charts Row 2 ──────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">RETURN DISTRIBUTION & MULTI-PERIOD</div>', unsafe_allow_html=True)
-
-c1, c2 = st.columns([2, 3])
-
-with c1:
-    # Distribution histogram
-    hist_vals = filtered[period].dropna()
-    fig_hist = go.Figure()
-    fig_hist.add_trace(go.Histogram(
-        x=hist_vals,
-        nbinsx=25,
-        marker_color="#3b82f6",
-        marker_line_color="#1e2d4a",
-        marker_line_width=1,
-        opacity=0.8,
-        hovertemplate="Return: %{x:.1f}%<br>Count: %{y}<extra></extra>",
-    ))
-    fig_hist.add_vline(x=0, line_color="#ef4444", line_width=1, line_dash="dash")
-    fig_hist.add_vline(x=hist_vals.mean(), line_color="#f59e0b", line_width=1, line_dash="dot",
-                       annotation_text=f"avg {hist_vals.mean():+.1f}%", annotation_font_color="#f59e0b",
-                       annotation_font_size=9, annotation_font_family="IBM Plex Mono")
-    fig_hist.update_layout(
-        title=dict(text=f"Return Distribution — {period}", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-        height=300,
-        margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(showgrid=True, gridcolor="#1e2d4a", zeroline=False, ticksuffix="%", title=""),
-        yaxis=dict(showgrid=True, gridcolor="#1e2d4a", title=""),
-        bargap=0.05,
-    )
-    st.plotly_chart(fig_hist, use_container_width=True)
-
-with c2:
-    # Multi-period heatmap — top 20 by absolute YTD return
-    PERIODS_ALL = ["YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"]
-    heat_df = filtered[["Ticker", "Name"] + PERIODS_ALL].copy()
-    heat_df["ShortTicker"] = heat_df["Ticker"].str.replace(r"\s+(TB|US|HK|CH|JP)\s+Equity", "", regex=True)
-    heat_df["abs_ytd"] = heat_df["YTD"].abs()
-    heat_df = heat_df.dropna(subset=["YTD"]).nlargest(20, "abs_ytd")
-
-    z = heat_df[PERIODS_ALL].values
-    y_labels = heat_df["ShortTicker"].tolist()
-
-    fig_heat = go.Figure(data=go.Heatmap(
-        z=z,
-        x=PERIODS_ALL,
-        y=y_labels,
-        colorscale=[[0, "#7f1d1d"], [0.5, "#1e2d4a"], [1, "#065f46"]],
-        zmid=0,
-        hovertemplate="<b>%{y}</b> — %{x}<br>Return: %{z:.1f}%<extra></extra>",
-        text=[[f"{v:+.0f}%" if not np.isnan(v) else "—" for v in row] for row in z],
-        texttemplate="%{text}",
-        textfont=dict(family="IBM Plex Mono", size=8),
-        showscale=True,
-        colorbar=dict(
-            tickfont=dict(family="IBM Plex Mono", size=8, color="#64748b"),
-            ticksuffix="%",
-            thickness=10,
-            len=0.8,
-        )
-    ))
-    fig_heat.update_layout(
-        title=dict(text="Multi-Period Return Heatmap (Top 20 by |YTD|)", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-        height=300,
-        margin=dict(l=10, r=60, t=40, b=10),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=False, autorange="reversed"),
-    )
-    st.plotly_chart(fig_heat, use_container_width=True)
-
-
-# ── Pipeline Section ─────────────────────────────────────────────────────────
-pipeline_df = filtered[~filtered["Is_DR80"]].copy()
-
-if len(pipeline_df) > 0:
-    st.markdown('<div class="section-header">PIPELINE — CANDIDATE SECURITIES</div>', unsafe_allow_html=True)
-
-    p1, p2 = st.columns([1, 2])
-
-    with p1:
-        # Pipeline by quarter donut
-        q_counts = pipeline_df["Quarter"].value_counts().sort_index()
-        fig_pie = go.Figure(data=go.Pie(
-            labels=q_counts.index,
-            values=q_counts.values,
-            hole=0.6,
-            marker_colors=["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6"],
-            textfont=dict(family="IBM Plex Mono", size=10),
-            hovertemplate="<b>%{label}</b><br>%{value} securities<extra></extra>",
+    with ca:
+        pdf = filt[["BBG_Ticker", "Name", period]].dropna(subset=[period]).copy()
+        pdf["S"] = pdf["BBG_Ticker"].apply(short_ticker)
+        pdf = pdf.sort_values(period, ascending=False)
+        half = min(15, len(pdf) // 2)
+        bar_df = pd.concat([pdf.head(half), pdf.tail(half)]).drop_duplicates().sort_values(period)
+        fig = go.Figure(go.Bar(
+            x=bar_df[period], y=bar_df["S"], orientation="h",
+            marker_color=bar_colors(bar_df[period]), marker_line_width=0,
+            hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>%{x:.1f}%<extra></extra>",
+            customdata=list(zip(bar_df["S"], bar_df["Name"]))
         ))
-        fig_pie.update_layout(
-            title=dict(text="Pipeline by Quarter", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-            height=280,
-            margin=dict(l=10, r=10, t=40, b=10),
-            legend=dict(font=dict(family="IBM Plex Mono", size=9, color="#64748b")),
-            annotations=[dict(text=f"<b>{len(pipeline_df)}</b><br>total", x=0.5, y=0.5, showarrow=False,
-                              font=dict(family="IBM Plex Mono", size=12, color="#e2e8f0"))],
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        fig.add_vline(x=0, line_color="#334155", line_width=1)
+        fig.update_layout(title=dict(text=f"Top & Bottom — {period}", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                          **base_layout(420), xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%"),
+                          yaxis=dict(showgrid=False))
+        st.plotly_chart(fig, use_container_width=True)
 
-    with p2:
-        # Pipeline scatter — YTD vs 1Y colored by sector
-        scatter_df = pipeline_df.dropna(subset=["YTD", "1Y"]).copy()
-        scatter_df["ShortTicker"] = scatter_df["Ticker"].str.replace(r"\s+(TB|US|HK|CH|JP)\s+Equity", "", regex=True)
+    with cb:
+        sp = filt.groupby("Sector")[period].mean().dropna().sort_values()
+        fig2 = go.Figure(go.Bar(
+            x=sp.values, y=sp.index, orientation="h",
+            marker_color=bar_colors(sp.values), marker_line_width=0,
+            text=[f"{v:+.1f}%" for v in sp.values], textposition="outside",
+            textfont=dict(family=C["font"], size=9, color=C["text"]),
+            hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
+        ))
+        fig2.add_vline(x=0, line_color="#334155", line_width=1)
+        fig2.update_layout(title=dict(text=f"Avg by Sector — {period}", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                           **base_layout(420, margin=dict(l=10, r=70, t=40, b=10)),
+                           xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%"),
+                           yaxis=dict(showgrid=False))
+        st.plotly_chart(fig2, use_container_width=True)
 
-        fig_scat = go.Figure()
-        sector_colors = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#06b6d4", "#f97316", "#84cc16"]
-        for i, (sec, grp) in enumerate(scatter_df.groupby("Sector")):
-            fig_scat.add_trace(go.Scatter(
-                x=grp["YTD"],
-                y=grp["1Y"],
-                mode="markers+text",
-                name=sec,
-                marker=dict(color=sector_colors[i % len(sector_colors)], size=8, opacity=0.85),
-                text=grp["ShortTicker"],
-                textposition="top center",
-                textfont=dict(family="IBM Plex Mono", size=8, color="#94a3b8"),
+    # Charts row 2
+    st.markdown('<div class="section-header">DISTRIBUTION & HEATMAP</div>', unsafe_allow_html=True)
+    cc1, cc2 = st.columns([2, 3])
+
+    with cc1:
+        hv = filt[period].dropna()
+        fig3 = go.Figure(go.Histogram(x=hv, nbinsx=20, marker_color=C["blue"],
+                                      marker_line_color=C["grid"], marker_line_width=1, opacity=0.85))
+        fig3.add_vline(x=0, line_color=C["neg"], line_width=1, line_dash="dash")
+        if len(hv):
+            fig3.add_vline(x=float(hv.mean()), line_color="#f59e0b", line_width=1, line_dash="dot",
+                           annotation_text=f"avg {hv.mean():+.1f}%",
+                           annotation_font=dict(color="#f59e0b", size=9, family=C["font"]))
+        fig3.update_layout(title=dict(text=f"Distribution — {period}", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                           **base_layout(300), xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%"),
+                           yaxis=dict(showgrid=True, gridcolor=C["grid"]))
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with cc2:
+        hdf = filt[["BBG_Ticker"] + PERIODS].copy()
+        hdf["S"] = hdf["BBG_Ticker"].apply(short_ticker)
+        hdf["abs_ytd"] = hdf["YTD"].abs()
+        hdf = hdf.dropna(subset=["YTD"]).nlargest(20, "abs_ytd")
+        z = hdf[PERIODS].values
+        fig4 = go.Figure(go.Heatmap(
+            z=z, x=PERIODS, y=hdf["S"].tolist(),
+            colorscale=[[0, "#7f1d1d"], [0.5, "#1e2d4a"], [1, "#065f46"]], zmid=0,
+            text=[[f"{v:+.0f}%" if not np.isnan(v) else "—" for v in row] for row in z],
+            texttemplate="%{text}", textfont=dict(family=C["font"], size=8),
+            hovertemplate="<b>%{y}</b> — %{x}<br>%{z:.1f}%<extra></extra>",
+            colorbar=dict(tickfont=dict(family=C["font"], size=8, color="#64748b"), ticksuffix="%", thickness=10),
+        ))
+        fig4.update_layout(title=dict(text="Multi-Period Heatmap (Top 20 |YTD|)", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                           **base_layout(300, margin=dict(l=10, r=60, t=40, b=10)),
+                           xaxis=dict(showgrid=False), yaxis=dict(showgrid=False, autorange="reversed"))
+        st.plotly_chart(fig4, use_container_width=True)
+
+    # Table
+    st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
+    sc1, sc2 = st.columns([2, 1])
+    with sc1:
+        sort_by = st.selectbox("Sort by", ["Name", "Sector"] + PERIODS, index=2, label_visibility="collapsed")
+    with sc2:
+        asc = st.checkbox("Ascending", value=False)
+
+    tbl = filt[["BBG_Ticker", "Name", "Sector", "Is_DR80", "Quarter"] + PERIODS].copy()
+    tbl["Ticker"] = tbl["BBG_Ticker"].apply(short_ticker)
+    tbl["Type"] = tbl["Is_DR80"].map({True: "DR80", False: "Pipeline"})
+    tbl = tbl.drop(columns=["BBG_Ticker", "Is_DR80"]).rename(columns={"Quarter": "Q"})
+    tbl = tbl[["Ticker", "Name", "Sector", "Type", "Q"] + PERIODS]
+    tbl = tbl.sort_values(sort_by, ascending=asc, na_position="last")
+
+    styled = (tbl.style
+              .applymap(style_pct, subset=PERIODS)
+              .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+              .set_properties(**{"font-family": "IBM Plex Mono", "font-size": "12px"}))
+    st.dataframe(styled, use_container_width=True, height=430)
+
+    # Export row
+    e1, e2 = st.columns(2)
+    with e1:
+        st.download_button("⬇ Export CSV", data=tbl.to_csv(index=False),
+                           file_name=f"DR80_{period}_{datetime.now().strftime('%Y%m%d')}.csv",
+                           mime="text/csv", use_container_width=True)
+    with e2:
+        if st.session_state.excel_bytes:
+            xl_out = write_excel(st.session_state.excel_bytes, st.session_state.df)
+            st.download_button("⬇ Export Updated Excel", data=xl_out,
+                               file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_pipeline:
+    pipe_df = df_all[~df_all["Is_DR80"]].copy()
+
+    st.markdown('<div class="section-header">PIPELINE OVERVIEW</div>', unsafe_allow_html=True)
+
+    if len(pipe_df) == 0:
+        st.info("No pipeline securities found.")
+    else:
+        p1, p2, p3 = st.columns(3)
+
+        with p1:
+            qc = pipe_df["Quarter"].value_counts().sort_index()
+            fp = go.Figure(go.Pie(labels=qc.index, values=qc.values, hole=0.6,
+                                  marker_colors=["#3b82f6","#10b981","#f59e0b","#8b5cf6"],
+                                  textfont=dict(family=C["font"], size=10),
+                                  hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
+            fp.update_layout(title=dict(text="By Quarter", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                             **base_layout(270), legend=dict(font=dict(family=C["font"], size=9, color="#64748b")),
+                             annotations=[dict(text=f"<b>{len(pipe_df)}</b><br>total", x=0.5, y=0.5,
+                                               showarrow=False, font=dict(family=C["font"], size=12, color="#e2e8f0"))])
+            st.plotly_chart(fp, use_container_width=True)
+
+        with p2:
+            sc = pipe_df["Sector"].value_counts()
+            fs = go.Figure(go.Pie(labels=sc.index, values=sc.values, hole=0.5,
+                                  textfont=dict(family=C["font"], size=9),
+                                  hovertemplate="<b>%{label}</b><br>%{value}<extra></extra>"))
+            fs.update_layout(title=dict(text="By Sector", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                             **base_layout(270), legend=dict(font=dict(family=C["font"], size=8, color="#64748b")))
+            st.plotly_chart(fs, use_container_width=True)
+
+        with p3:
+            qa = pipe_df.groupby("Quarter")["YTD"].mean().dropna().sort_index()
+            fq = go.Figure(go.Bar(x=qa.index, y=qa.values,
+                                  marker_color=bar_colors(qa.values),
+                                  text=[f"{v:+.1f}%" for v in qa.values], textposition="outside",
+                                  textfont=dict(family=C["font"], size=9, color=C["text"])))
+            fq.add_hline(y=0, line_color="#334155", line_width=1)
+            fq.update_layout(title=dict(text="Avg YTD by Quarter", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                             **base_layout(270, margin=dict(l=10, r=10, t=40, b=30)),
+                             xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%"))
+            st.plotly_chart(fq, use_container_width=True)
+
+        # Scatter
+        st.markdown('<div class="section-header">POSITIONING — YTD vs 1Y</div>', unsafe_allow_html=True)
+        sdf = pipe_df.dropna(subset=["YTD", "1Y"]).copy()
+        sdf["S"] = sdf["BBG_Ticker"].apply(short_ticker)
+        sec_colors = ["#3b82f6","#10b981","#f59e0b","#8b5cf6","#ef4444","#06b6d4","#f97316","#84cc16"]
+        fscat = go.Figure()
+        for i, (sec, grp) in enumerate(sdf.groupby("Sector")):
+            fscat.add_trace(go.Scatter(
+                x=grp["YTD"], y=grp["1Y"], mode="markers+text", name=sec,
+                marker=dict(color=sec_colors[i % len(sec_colors)], size=9, opacity=0.85),
+                text=grp["S"], textposition="top center",
+                textfont=dict(family=C["font"], size=8, color=C["text"]),
                 hovertemplate="<b>%{text}</b><br>YTD: %{x:.1f}%<br>1Y: %{y:.1f}%<extra></extra>",
             ))
+        fscat.add_hline(y=0, line_color="#334155", line_width=1)
+        fscat.add_vline(x=0, line_color="#334155", line_width=1)
+        fscat.update_layout(title=dict(text="Pipeline: YTD vs 1-Year", font=dict(family=C["font"], size=11, color="#64748b"), x=0),
+                            **base_layout(380, margin=dict(l=10, r=10, t=40, b=60)),
+                            xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", title="YTD"),
+                            yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", title="1-Year"),
+                            legend=dict(font=dict(family=C["font"], size=8, color="#64748b"), orientation="h", y=-0.2))
+        st.plotly_chart(fscat, use_container_width=True)
 
-        fig_scat.add_hline(y=0, line_color="#334155", line_width=1)
-        fig_scat.add_vline(x=0, line_color="#334155", line_width=1)
-        fig_scat.update_layout(
-            title=dict(text="Pipeline: YTD vs 1-Year Return", font=dict(family="IBM Plex Mono", size=11, color="#64748b"), x=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="IBM Plex Mono", color="#94a3b8", size=9),
-            height=280,
-            margin=dict(l=10, r=10, t=40, b=10),
-            xaxis=dict(showgrid=True, gridcolor="#1e2d4a", zeroline=False, ticksuffix="%", title="YTD Return"),
-            yaxis=dict(showgrid=True, gridcolor="#1e2d4a", zeroline=False, ticksuffix="%", title="1-Year Return"),
-            legend=dict(font=dict(family="IBM Plex Mono", size=8, color="#64748b"), orientation="h", y=-0.15),
-        )
-        st.plotly_chart(fig_scat, use_container_width=True)
+        # Pipeline table
+        st.markdown('<div class="section-header">PIPELINE TABLE</div>', unsafe_allow_html=True)
+        pt = pipe_df[["BBG_Ticker", "Name", "Sector", "Quarter"] + PERIODS].copy()
+        pt["Ticker"] = pt["BBG_Ticker"].apply(short_ticker)
+        pt = pt.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter": "Q"})
+        pt = pt[["Ticker", "Name", "Sector", "Q"] + PERIODS]
+        styled_pt = (pt.style
+                     .applymap(style_pct, subset=PERIODS)
+                     .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+                     .set_properties(**{"font-family": "IBM Plex Mono", "font-size": "12px"}))
+        st.dataframe(styled_pt, use_container_width=True, height=380)
 
 
-# ── Data Table ────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — ADD SECURITY
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_add:
+    st.markdown('<div class="section-header">ADD PIPELINE SECURITY</div>', unsafe_allow_html=True)
 
-PERIODS_ALL = ["YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"]
-table_df = filtered[["Ticker", "Name", "Sector", "Is_DR80", "Quarter"] + PERIODS_ALL].copy()
-table_df["Ticker"] = table_df["Ticker"].str.replace(r"\s+(TB|US|HK|CH|JP)\s+Equity", "", regex=True)
-table_df["Type"] = table_df["Is_DR80"].map({True: "DR80", False: "Pipeline"})
-table_df = table_df.drop(columns=["Is_DR80"])
-table_df = table_df.rename(columns={"Quarter": "Q"})
+    col_f, col_p = st.columns([1, 1])
 
-# Sort options
-sort_col = st.selectbox("Sort by", ["Name", "Sector", "YTD", "1M", "3M", "6M", "1Y"], index=2, label_visibility="collapsed")
-sort_asc = st.checkbox("Ascending", value=False)
-table_df = table_df.sort_values(sort_col, ascending=sort_asc, na_position="last")
+    with col_f:
+        st.markdown("Fill in the form below. Bloomberg ticker is auto-converted to Yahoo Finance format for data fetching.")
+        st.markdown("")
 
-# Style the dataframe
-def style_pct(val):
-    if pd.isna(val): return "color: #475569"
-    return "color: #10b981" if val >= 0 else "color: #ef4444"
+        with st.form("add_form", clear_on_submit=True):
+            bbg_in = st.text_input("Bloomberg Ticker *", placeholder="e.g. AAPL US Equity, 9988 HK Equity, 6857 JP Equity")
+            name_in = st.text_input("Company Name *", placeholder="e.g. Apple Inc")
+            q_in = st.selectbox("Target Quarter", ["Q1", "Q2", "Q3"])
+            sec_in = st.selectbox("Sector", SECTORS)
+            fetch_on = st.checkbox("Fetch return data from Yahoo Finance", value=True)
+            add_btn = st.form_submit_button("➕ Add Security", use_container_width=True)
 
-styled = table_df.style.applymap(
-    style_pct,
-    subset=PERIODS_ALL
-).format(
-    {p: lambda x: f"{x:+.1f}%" if pd.notna(x) else "—" for p in PERIODS_ALL}
-).set_properties(**{
-    "font-family": "IBM Plex Mono",
-    "font-size": "12px",
-    "background-color": "#0a0e1a",
-    "color": "#94a3b8",
-    "border-color": "#1e2d4a",
-})
+        if add_btn:
+            if not bbg_in.strip() or not name_in.strip():
+                st.error("Bloomberg ticker and company name are required.")
+            elif st.session_state.df is not None and bbg_in.strip() in st.session_state.df["BBG_Ticker"].values:
+                st.warning(f"⚠️ {bbg_in.strip()} already exists.")
+            else:
+                bbg_clean = bbg_in.strip()
+                yahoo = bbg_to_yahoo(bbg_clean)
+                new_row = {"BBG_Ticker": bbg_clean, "Yahoo_Ticker": yahoo,
+                           "Name": name_in.strip(), "Sector": sec_in,
+                           "Quarter": q_in, "Is_DR80": False,
+                           **{p: None for p in PERIODS}}
 
-st.dataframe(styled, use_container_width=True, height=450)
+                if fetch_on:
+                    if yahoo:
+                        with st.spinner(f"Fetching {yahoo}…"):
+                            rets = fetch_single(yahoo)
+                        new_row.update(rets)
+                        st.success(f"✓ Fetched data for {yahoo}")
+                    else:
+                        st.warning("TB Equity tickers are not available on Yahoo Finance — added without returns.")
 
-# ── Download ──────────────────────────────────────────────────────────────────
-csv = table_df.to_csv(index=False)
-st.download_button(
-    "⬇ Export to CSV",
-    data=csv,
-    file_name=f"DR80_filtered_{period}.csv",
-    mime="text/csv",
-    help="Download the currently filtered data"
-)
+                st.session_state.df = pd.concat(
+                    [st.session_state.df, pd.DataFrame([new_row])], ignore_index=True
+                )
+                st.success(f"✓ Added **{bbg_clean}** ({name_in.strip()}) → {sec_in} / {q_in}")
+                st.rerun()
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+    with col_p:
+        # Live ticker preview
+        st.markdown("**Ticker Conversion Preview**")
+        preview_bbg = st.text_input("Type a Bloomberg ticker to preview", placeholder="e.g. 9984 JP Equity",
+                                    label_visibility="collapsed")
+        if preview_bbg.strip():
+            py = bbg_to_yahoo(preview_bbg.strip())
+            st.markdown(f"""
+            <div style="font-family:IBM Plex Mono;font-size:0.8rem;background:#111827;border:1px solid #1e2d4a;border-radius:8px;padding:16px;margin-bottom:16px;">
+            <div style="color:#475569;font-size:0.65rem;text-transform:uppercase;margin-bottom:10px;">Conversion Result</div>
+            <div style="color:#94a3b8;margin-bottom:6px;">Bloomberg: <span style="color:#e2e8f0">{preview_bbg.strip()}</span></div>
+            <div style="color:#94a3b8;">Yahoo Finance: <span style="color:{'#10b981' if py else '#ef4444'}">{py if py else 'N/A (TB Equity / unknown exchange)'}</span></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("**Current Pipeline**")
+        if st.session_state.df is not None:
+            pp = st.session_state.df[~st.session_state.df["Is_DR80"]][
+                ["BBG_Ticker", "Name", "Sector", "Quarter", "YTD"]].copy()
+            pp["Ticker"] = pp["BBG_Ticker"].apply(short_ticker)
+            pp["YTD"] = pp["YTD"].apply(fmt_pct)
+            pp = pp.drop(columns=["BBG_Ticker"]).rename(columns={"Quarter": "Q"})
+            pp = pp[["Ticker", "Name", "Sector", "Q", "YTD"]]
+            st.dataframe(pp, use_container_width=True, height=360, hide_index=True)
+
+    # Save section
+    st.markdown("---")
+    st.markdown('<div class="section-header">SAVE TO EXCEL</div>', unsafe_allow_html=True)
+    st.caption("Downloads a new Excel file preserving the original DR80_Tracking.xlsx structure, with updated returns and any new pipeline entries appended under their correct sector.")
+
+    if st.session_state.excel_bytes and st.session_state.df is not None:
+        if st.button("Generate Updated Excel", use_container_width=False):
+            with st.spinner("Writing Excel…"):
+                xl = write_excel(st.session_state.excel_bytes, st.session_state.df)
+            st.download_button(
+                "⬇ Download Updated DR80_Tracking.xlsx",
+                data=xl,
+                file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    else:
+        st.info("Load a file in the sidebar first.")
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.markdown(
-    '<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#1e2d4a;text-align:center;">KTB SECURITIES · DEPOSITARY RECEIPT OPERATIONS · DR80 TRACKING SYSTEM</div>',
-    unsafe_allow_html=True
-)
+st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.6rem;color:#1e2d4a;text-align:center;">KTB SECURITIES · DR OPERATIONS · DR80 TRACKING SYSTEM</div>', unsafe_allow_html=True)
