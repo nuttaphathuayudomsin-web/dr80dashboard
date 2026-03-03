@@ -986,6 +986,77 @@ with tab_sector:
 # TAB 3 — PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_pipeline:
+    # ── Graduate to DR80 ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">🎓 GRADUATE TO DR80</div>', unsafe_allow_html=True)
+    st.caption("Promote launched pipeline securities to DR80 status. Ticker converts automatically (e.g. MU US Equity → MU80 TB Equity). Q1 pre-selected as the upcoming launch cohort.")
+
+    all_pipe = df_all[~df_all["Is_DR80"]].copy()
+    if len(all_pipe) == 0:
+        st.info("No pipeline securities available to graduate.")
+    else:
+        all_pipe["Display"] = all_pipe.apply(
+            lambda r: f"[{r['Quarter'] or '?'}]  {display_label(r['BBG_Ticker'], r['Name'])}  —  {r['Name'][:40]}",
+            axis=1
+        )
+        q1_tickers = all_pipe[all_pipe["Quarter"] == "Q1"]["BBG_Ticker"].tolist()
+        all_options = all_pipe["BBG_Ticker"].tolist()
+        all_displays = dict(zip(all_pipe["BBG_Ticker"], all_pipe["Display"]))
+
+        grad_col1, grad_col2 = st.columns([3, 1])
+        with grad_col1:
+            to_graduate = st.multiselect(
+                "Select securities to graduate",
+                options=all_options,
+                default=q1_tickers,
+                format_func=lambda x: all_displays.get(x, x),
+                label_visibility="collapsed",
+                key="grad_select",
+                placeholder="Select securities to promote to DR80..."
+            )
+        with grad_col2:
+            if to_graduate:
+                st.markdown(f"""<div class="metric-card green" style="margin-top:4px;">
+                <div class="metric-label">Selected</div>
+                <div class="metric-value" style="color:#10b981">{len(to_graduate)}</div>
+                <div class="metric-sub">ready to graduate</div></div>""", unsafe_allow_html=True)
+
+        if to_graduate:
+            # Ticker preview
+            preview_html = "".join([
+                f'<span style="color:#64748b;font-size:0.8rem;">{b.rsplit(" ",2)[0]}  <span style="color:#3b82f6">→</span>  <span style="color:#10b981">{b.rsplit(" ",2)[0]}80 TB Equity</span></span><br>'
+                for b in to_graduate[:6]
+            ])
+            if len(to_graduate) > 6:
+                preview_html += f'<span style="color:#334155;font-size:0.75rem;">+ {len(to_graduate)-6} more</span>'
+            st.markdown(f'<div style="font-family:IBM Plex Mono;background:#0d1221;border:1px solid #1e2d4a;border-radius:6px;padding:10px 14px;margin-bottom:12px;">{preview_html}</div>', unsafe_allow_html=True)
+
+            btn1, btn2, _ = st.columns([1.2, 1.5, 2])
+            with btn1:
+                if st.button("🎓  Graduate to DR80", use_container_width=True, type="primary", key="grad_btn"):
+                    st.session_state.df = graduate_to_dr80(st.session_state.df, to_graduate)
+                    st.session_state.graduated = st.session_state.get("graduated", []) + to_graduate
+                    st.success(f"✓ {len(to_graduate)} securities promoted to DR80. Download the updated Excel to save permanently.")
+                    st.rerun()
+            with btn2:
+                if st.session_state.excel_bytes and st.session_state.get("graduated"):
+                    try:
+                        xl_grad = write_excel_graduated(
+                            st.session_state.excel_bytes,
+                            st.session_state.df,
+                            st.session_state.graduated
+                        )
+                        st.download_button(
+                            "⬇  Download with Graduations",
+                            data=xl_grad,
+                            file_name=f"DR80_Tracking_graduated_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="grad_download"
+                        )
+                    except Exception as e:
+                        st.error(f"Excel write failed: {e}")
+
+    st.markdown("---")
     pipe_df_all = df_all[~df_all["Is_DR80"]].copy()
     st.markdown('<div class="section-header">PIPELINE OVERVIEW</div>', unsafe_allow_html=True)
     if len(pipe_df_all) == 0:
@@ -1059,86 +1130,6 @@ with tab_pipeline:
                      .format({p: lambda x: fmt_pct(x) for p in PERIODS})
                      .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
                      use_container_width=True, height=380)
-
-    # ── Graduate to DR80 ───────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown('<div class="section-header">🎓 GRADUATE TO DR80</div>', unsafe_allow_html=True)
-    st.caption("Select pipeline securities that have launched and promote them to current DR80 status. Their ticker will be converted to the DR80 format (e.g. MU US Equity → MU80 TB Equity).")
-
-    all_pipe = df_all[~df_all["Is_DR80"]].copy()
-    if len(all_pipe) == 0:
-        st.info("No pipeline securities to graduate.")
-    else:
-        # Group by quarter for easy selection
-        grad_col1, grad_col2 = st.columns([2, 1])
-        with grad_col1:
-            # Show all pipeline with quarter label for selection
-            all_pipe["Display"] = all_pipe.apply(
-                lambda r: f"[{r['Quarter'] or '?'}]  {display_label(r['BBG_Ticker'], r['Name'])}  —  {r['Name'][:35]}",
-                axis=1
-            )
-            # Pre-select Q1 by default since that's the launched quarter
-            q1_tickers = all_pipe[all_pipe["Quarter"] == "Q1"]["BBG_Ticker"].tolist()
-            all_options = all_pipe["BBG_Ticker"].tolist()
-            all_displays = dict(zip(all_pipe["BBG_Ticker"], all_pipe["Display"]))
-
-            to_graduate = st.multiselect(
-                "Select securities to graduate",
-                options=all_options,
-                default=q1_tickers,
-                format_func=lambda x: all_displays.get(x, x),
-                label_visibility="collapsed",
-                key="grad_select",
-                placeholder="Select securities to promote to DR80..."
-            )
-
-        with grad_col2:
-            if to_graduate:
-                st.markdown(f"""<div class="metric-card green">
-                <div class="metric-label">Ready to Graduate</div>
-                <div class="metric-value" style="color:#10b981">{len(to_graduate)}</div>
-                <div class="metric-sub">securities selected</div></div>""", unsafe_allow_html=True)
-
-                # Preview the ticker transformation
-                st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.75rem;color:#475569;margin-top:12px;margin-bottom:6px;">TICKER CONVERSION PREVIEW</div>', unsafe_allow_html=True)
-                for bbg in to_graduate[:5]:
-                    code = bbg.rsplit(" ", 2)[0].strip()
-                    new_ticker = f"{code}80 TB Equity"
-                    st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.75rem;color:#64748b;margin-bottom:3px;">{bbg} <span style="color:#3b82f6">→</span> <span style="color:#10b981">{new_ticker}</span></div>', unsafe_allow_html=True)
-                if len(to_graduate) > 5:
-                    st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#334155;">+ {len(to_graduate)-5} more...</div>', unsafe_allow_html=True)
-
-        if to_graduate:
-            st.markdown("")
-            g1, g2, _ = st.columns([1, 1, 2])
-            with g1:
-                if st.button("🎓 Graduate Selected to DR80", use_container_width=True, type="primary", key="grad_btn"):
-                    # Update in-memory DataFrame
-                    new_df = graduate_to_dr80(st.session_state.df, to_graduate)
-                    st.session_state.df = new_df
-                    st.session_state.graduated = st.session_state.get("graduated", []) + to_graduate
-                    st.success(f"✓ Graduated {len(to_graduate)} securities to DR80. Download the updated Excel below to save permanently.")
-                    st.rerun()
-
-            with g2:
-                # Download updated Excel with graduations baked in
-                if st.session_state.excel_bytes and st.session_state.get("graduated"):
-                    try:
-                        xl_grad = write_excel_graduated(
-                            st.session_state.excel_bytes,
-                            st.session_state.df,
-                            st.session_state.graduated
-                        )
-                        st.download_button(
-                            "⬇ Download with Graduations",
-                            data=xl_grad,
-                            file_name=f"DR80_Tracking_graduated_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key="grad_download"
-                        )
-                    except Exception as e:
-                        st.error(f"Excel generation failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
