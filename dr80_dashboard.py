@@ -838,6 +838,123 @@ with tab_dash:
                           yaxis=dict(showgrid=False,autorange="reversed",tickfont=dict(size=11,color="#e2e8f0")))
     st.plotly_chart(fig_sh2, use_container_width=True)
 
+    # ── PRICE RETURN BY DURATION ───────────────────────────────────────────────
+    st.markdown('<div class="section-header">PRICE RETURN BY DURATION</div>', unsafe_allow_html=True)
+    st.caption("Compare every security's return across all time periods at once.")
+
+    prd_df = filt[["BBG_Ticker","Name","Sector","Is_DR80"] + PERIODS].copy()
+    prd_df["Ticker"] = prd_df.apply(lambda r: display_label(r["BBG_Ticker"], r["Name"]), axis=1).astype(str)
+    prd_df["Type"]   = prd_df["Is_DR80"].map({True: "DR80", False: "Pipeline"})
+    prd_df = prd_df.drop(columns=["BBG_Ticker","Is_DR80"])
+
+    prd_c1, prd_c2, prd_c3 = st.columns([2, 2, 2])
+    with prd_c1:
+        prd_type = st.radio("Show", ["All", "DR80 Only", "Pipeline Only"],
+                            horizontal=True, key="prd_type")
+    with prd_c2:
+        prd_sort = st.selectbox("Sort by period", PERIODS, index=PERIODS.index("YTD"),
+                                key="prd_sort", label_visibility="collapsed")
+    with prd_c3:
+        prd_asc = st.checkbox("Ascending", value=False, key="prd_asc")
+
+    if prd_type == "DR80 Only":
+        prd_df = prd_df[prd_df["Type"] == "DR80"]
+    elif prd_type == "Pipeline Only":
+        prd_df = prd_df[prd_df["Type"] == "Pipeline"]
+
+    prd_df = prd_df.sort_values(prd_sort, ascending=prd_asc, na_position="last").reset_index(drop=True)
+
+    # Per-period KPI summary row
+    kpi_cols = st.columns(len(PERIODS))
+    for _ki, _p in enumerate(PERIODS):
+        _col_data = prd_df[_p].dropna()
+        if len(_col_data) == 0:
+            kpi_cols[_ki].markdown(f'<div class="metric-card"><div class="metric-label">{_p}</div><div class="metric-value">—</div></div>', unsafe_allow_html=True)
+            continue
+        _avg = _col_data.mean()
+        _vc = C["pos"] if _avg >= 0 else C["neg"]
+        _cls = "green" if _avg >= 0 else "red"
+        _best_nm  = prd_df.loc[_col_data.idxmax(), "Ticker"] if _col_data.idxmax() in prd_df.index else "—"
+        _worst_nm = prd_df.loc[_col_data.idxmin(), "Ticker"] if _col_data.idxmin() in prd_df.index else "—"
+        kpi_cols[_ki].markdown(f"""
+<div class="metric-card {_cls}" style="padding:10px 14px;">
+  <div class="metric-label">{_p}</div>
+  <div class="metric-value" style="color:{_vc};font-size:1.3rem;">{fmt_pct(_avg)}</div>
+  <div class="metric-sub" style="color:#10b981;font-size:0.7rem;">▲ {fmt_pct(_col_data.max())} {_best_nm}</div>
+  <div class="metric-sub" style="color:#ef4444;font-size:0.7rem;">▼ {fmt_pct(_col_data.min())} {_worst_nm}</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Grouped bar: top+bottom N, all periods side by side
+    prd_top_n = st.slider("Top / bottom N", 5, 25, 12, key="prd_topn")
+    _top_h = prd_df.dropna(subset=[prd_sort]).head(prd_top_n)
+    _bot_h = prd_df.dropna(subset=[prd_sort]).tail(prd_top_n)
+    prd_show = pd.concat([_top_h, _bot_h]).drop_duplicates().reset_index(drop=True)
+
+    period_colors_map = {
+        "YTD":"#3b82f6","1M":"#10b981","3M":"#f59e0b",
+        "6M":"#8b5cf6","1Y":"#06b6d4","3Y":"#f97316","5Y":"#ef4444"
+    }
+    fig_dur = go.Figure()
+    for _p in PERIODS:
+        fig_dur.add_trace(go.Bar(
+            name=_p,
+            x=prd_show["Ticker"].astype(str),
+            y=prd_show[_p].fillna(0),
+            marker_color=period_colors_map.get(_p,"#64748b"),
+            opacity=0.85,
+            hovertemplate=f"<b>%{{x}}</b> — {_p}<br>%{{y:.1f}}%<extra></extra>",
+        ))
+    fig_dur.add_hline(y=0, line_color="#334155", line_width=1)
+    fig_dur.update_layout(
+        title=dict(text=f"Multi-Period Returns — Top & Bottom {prd_top_n} by {prd_sort}",
+                   font=dict(family=C["font"], size=15, color="#64748b"), x=0),
+        **base_layout(420, margin=dict(l=10, r=10, t=50, b=80)),
+        barmode="group",
+        xaxis=dict(showgrid=False, tickfont=dict(size=10), tickangle=-35),
+        yaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", tickfont=dict(size=12)),
+        legend=dict(font=dict(family=C["font"], size=12, color="#94a3b8"),
+                    orientation="h", y=1.08, x=0),
+    )
+    st.plotly_chart(fig_dur, use_container_width=True)
+
+    # Momentum score bar
+    st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#475569;text-transform:uppercase;letter-spacing:0.1em;margin:8px 0 10px;">MOMENTUM SCORE — # PERIODS IN POSITIVE TERRITORY</div>', unsafe_allow_html=True)
+    prd_df["Momentum"] = prd_df[PERIODS].apply(lambda row: int((row > 0).sum()), axis=1)
+    mom_sorted = prd_df.sort_values("Momentum", ascending=False).head(20)
+    fig_mom = go.Figure(go.Bar(
+        x=mom_sorted["Ticker"].astype(str),
+        y=mom_sorted["Momentum"],
+        marker_color=["#3b82f6" if t=="DR80" else "#f59e0b" for t in mom_sorted["Type"]],
+        marker_line_width=0,
+        text=[f"{v}/{len(PERIODS)}" for v in mom_sorted["Momentum"]],
+        textposition="outside",
+        textfont=dict(family=C["font"], size=11, color=C["text"]),
+        hovertemplate="<b>%{x}</b><br>%{y} of " + str(len(PERIODS)) + " periods positive<extra></extra>",
+    ))
+    fig_mom.update_layout(
+        title=dict(text="Momentum Score — Periods in Positive Territory (Top 20)",
+                   font=dict(family=C["font"], size=14, color="#64748b"), x=0),
+        **base_layout(300, margin=dict(l=10, r=10, t=44, b=60)),
+        xaxis=dict(showgrid=False, tickfont=dict(size=10), tickangle=-35),
+        yaxis=dict(showgrid=True, gridcolor=C["grid"], tickfont=dict(size=12),
+                   range=[0, len(PERIODS) + 0.5]),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_mom, use_container_width=True)
+
+    # Full expandable duration table
+    with st.expander("📋 Full Duration Table", expanded=False):
+        dur_tbl = prd_df[["Ticker","Name","Sector","Type","Momentum"] + PERIODS].copy()
+        st.dataframe(
+            dur_tbl.style
+                .applymap(style_pct, subset=PERIODS)
+                .format({p: lambda x: fmt_pct(x) for p in PERIODS})
+                .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+            use_container_width=True, height=450
+        )
+
     st.markdown('<div class="section-header">SECURITY TABLE</div>', unsafe_allow_html=True)
     sc1, sc2 = st.columns([2,1])
     with sc1: sort_by = st.selectbox("Sort by", ["Name","Sector"]+PERIODS, index=2, label_visibility="collapsed")
@@ -863,10 +980,6 @@ with tab_dash:
                                file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — SECTOR ANALYSIS
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_sector:
     st.markdown('<div class="section-header">SECTOR DEEP-DIVE</div>', unsafe_allow_html=True)
@@ -1329,16 +1442,30 @@ with tab_mktshare:
         _min_date = liq_df_raw["Date"].min().date()
         _max_date = liq_df_raw["Date"].max().date()
 
+        # Initialise persistent date values in session state (separate from widget keys)
+        if "dr_start_val" not in st.session_state:
+            st.session_state["dr_start_val"] = _max_date - timedelta(days=30)
+        if "dr_end_val" not in st.session_state:
+            st.session_state["dr_end_val"] = _max_date
+
+        # Clamp stored values to valid range (data may have changed after re-fetch)
+        st.session_state["dr_start_val"] = max(_min_date, min(st.session_state["dr_start_val"], _max_date))
+        st.session_state["dr_end_val"]   = max(_min_date, min(st.session_state["dr_end_val"],   _max_date))
+
         st.markdown('<div class="section-header">📅 DATE RANGE — LIQUIDITY ANALYSIS</div>', unsafe_allow_html=True)
         dr_col1, dr_col2, dr_col3 = st.columns([2, 2, 3])
         with dr_col1:
-            dr_start = st.date_input("From", value=_max_date - timedelta(days=30),
+            dr_start = st.date_input("From",
+                                     value=st.session_state["dr_start_val"],
                                      min_value=_min_date, max_value=_max_date,
-                                     key="dr_start")
+                                     key="dr_start_widget")
+            st.session_state["dr_start_val"] = dr_start
         with dr_col2:
-            dr_end   = st.date_input("To", value=_max_date,
-                                     min_value=_min_date, max_value=_max_date,
-                                     key="dr_end")
+            dr_end = st.date_input("To",
+                                   value=st.session_state["dr_end_val"],
+                                   min_value=_min_date, max_value=_max_date,
+                                   key="dr_end_widget")
+            st.session_state["dr_end_val"] = dr_end
         with dr_col3:
             st.markdown("<br>", unsafe_allow_html=True)
             qp_cols = st.columns(5)
@@ -1348,8 +1475,8 @@ with tab_mktshare:
                 if qp_cols[_qi].button(_ql, key=f"qp_{_ql}", use_container_width=True):
                     _cutoff = (datetime(datetime.today().year, 1, 1).date()
                                if _qd == 0 else (_max_date - timedelta(days=_qd)))
-                    st.session_state["dr_start"] = _cutoff
-                    st.session_state["dr_end"]   = _max_date
+                    st.session_state["dr_start_val"] = _cutoff
+                    st.session_state["dr_end_val"]   = _max_date
                     st.rerun()
 
         # Prev-period of same length for WoW/MoM-style comparison
@@ -1915,17 +2042,14 @@ with tab_mktshare:
                         )
                         st.plotly_chart(fig_contrib, use_container_width=True)
 
-                        # Table
-                        contrib["Current"]  = contrib["Current"].apply(fmt_vol)
-                        contrib["Previous"] = contrib["Previous"].apply(fmt_vol)
-                        contrib["Δ_disp"]   = contrib["Δ"].apply(lambda v: f"{v:+,.0f}")
-                        contrib["Δ%_disp"]  = contrib["Δ%"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
+                        # Table — style on raw numeric first, then format for display
+                        contrib_tbl = contrib[["Base","Δ","Δ%"]].copy()
+                        contrib_tbl.insert(1, "Current",  contrib["Current"].apply(fmt_vol))
+                        contrib_tbl.insert(2, "Previous", contrib["Previous"].apply(fmt_vol))
                         st.dataframe(
-                            contrib[["Base","Current","Previous","Δ_disp","Δ%_disp"]]
-                                .rename(columns={"Δ_disp": f"Δ {metric_col}", "Δ%_disp": "Δ%"})
-                                .style.applymap(lambda v: _pp_color(
-                                    float(v.replace("%","").replace("+","")) if isinstance(v, str) and v not in ["—",""] else np.nan
-                                ), subset=[f"Δ {metric_col}", "Δ%"])
+                            contrib_tbl.style
+                                .applymap(_pp_color, subset=["Δ", "Δ%"])
+                                .format({"Δ": lambda v: f"{v:+,.0f}", "Δ%": lambda v: f"{v:+.1f}%" if pd.notna(v) else "—"})
                                 .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
                             use_container_width=True, hide_index=True, height=300
                         )
