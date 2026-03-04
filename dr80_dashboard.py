@@ -1317,20 +1317,11 @@ def fetch_issuer_dr_data(base_codes: tuple, issuers: tuple, period_days: int) ->
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_issuer_returns(base_codes: tuple, issuers: tuple) -> pd.DataFrame:
-    """Fetch WoW / MoM / YTD / 1Y returns for every base × issuer combination."""
+    """Fetch WoW / MoM / YTD / 1Y returns for every base × issuer combination.
+    Uses individual Ticker.history() calls so Yahoo cannot silently drop tickers."""
     today = datetime.today()
-    ticker_map = {f"{base}{code}.BK": (base, issuer, code)
-                  for base in base_codes for issuer, code in issuers}
-    if not ticker_map:
-        return pd.DataFrame()
-    try:
-        raw = yf.download(list(ticker_map.keys()),
-                          start=(today - timedelta(days=375)).strftime("%Y-%m-%d"),
-                          end=today.strftime("%Y-%m-%d"),
-                          auto_adjust=True, progress=False)
-        prices = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
-    except Exception:
-        return pd.DataFrame()
+    start_dt = (today - timedelta(days=375)).strftime("%Y-%m-%d")
+    end_dt   = today.strftime("%Y-%m-%d")
 
     def pct(series, days):
         s = series.dropna()
@@ -1342,17 +1333,22 @@ def fetch_issuer_returns(base_codes: tuple, issuers: tuple) -> pd.DataFrame:
         return round((ep / sp - 1) * 100, 2) if sp != 0 else None
 
     rows = []
-    for yahoo, (base, issuer, code) in ticker_map.items():
-        try:
-            s = prices[yahoo] if (isinstance(prices, pd.DataFrame) and yahoo in prices.columns) else (prices if isinstance(prices, pd.Series) else None)
-            if s is None or len(s.dropna()) < 2:
+    for base in base_codes:
+        for issuer, code in issuers:
+            yahoo = f"{base}{code}.BK"
+            try:
+                s = yf.Ticker(yahoo).history(start=start_dt, end=end_dt, auto_adjust=True)["Close"]
+                s = s.dropna()
+                if len(s) < 2:
+                    continue
+                rows.append({
+                    "Base": base, "Issuer": issuer, "Yahoo": yahoo,
+                    "WoW": pct(s, 7), "MoM": pct(s, 30),
+                    "YTD": pct(s, 0), "1Y":  pct(s, 365),
+                    "LastClose": float(s.iloc[-1])
+                })
+            except Exception:
                 continue
-            rows.append({"Base": base, "Issuer": issuer, "Yahoo": yahoo,
-                         "WoW": pct(s, 7), "MoM": pct(s, 30),
-                         "YTD": pct(s, 0), "1Y":  pct(s, 365),
-                         "LastClose": float(s.dropna().iloc[-1])})
-        except Exception:
-            continue
     return pd.DataFrame(rows)
 
 
@@ -1369,39 +1365,50 @@ with tab_mktshare:
     # All known underlyings that any Thai issuer has ever listed as a DR on SET.
     # The fetch tries every base × issuer code combination; Yahoo simply returns no
     # data for combinations that don't exist, so this list can be broad.
-    DR_UNIVERSE = sorted([
-        # US Tech / Mega-cap
+    # Base universe — supplemented by Excel scan so every issuer's DRs are included
+    _BASE_UNIVERSE = [
         "AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","AVGO","AMD",
         "ORCL","QCOM","INTC","MU","AMAT","LRCX","KLAC","MRVL","SNDK","WDC",
         "CRM","ADBE","NOW","INTU","PANW","CRWD","ZS","DDOG","SNOW","PLTR",
         "UBER","LYFT","ABNB","DASH","RBLX","SPOT","NFLX","DIS","CMCSA",
         "PYPL","SQ","COIN","HOOD","SOFI","AFRM",
-        # US Finance / Healthcare / Consumer
         "JPM","GS","MS","BAC","WFC","C","BLK","V","MA","AXP",
         "JNJ","PFE","MRK","ABBV","LLY","UNH","CVS","AMGN","GILD","BIIB",
-        "AMZN","WMT","COST","TGT","HD","LOW","NKE","SBUX","MCD","KO","PEP",
-        # US Energy / Industrial
+        "WMT","COST","TGT","HD","LOW","NKE","SBUX","MCD","KO","PEP",
         "XOM","CVX","COP","SLB","NEE","GE","CAT","DE","BA","RTX","LMT","NOC",
-        # China / HK tech
         "BABA","BIDU","JD","PDD","TCEHY","NTES","BEKE","XPEV","LI","NIO",
         "9988","700","3690","9618","9999","2382","1810","9868","2015",
-        # Korea
         "005930","000660","051910","035420","035720","068270","207940","006400",
-        # Japan
         "7203","6758","9984","6861","4063","8306","9432","7974","6902","4519",
-        # HK / ASEAN
         "GRAB","SE","GOTO","TCOM","MELI","NU","VALE","ITUB","BBD",
-        # ETFs occasionally used as underlyings
         "QQQ","SPY","GLD","IAU","SLV","USO","IWM","XLK","XLF","SOXX",
-        # Commodities / futures proxies
         "GC","SI","CL","NG",
-    ])
+    ]
+
+    # Also extract bases from the Excel file using ALL issuer codes — this is the
+    # ground truth: if an issuer has a DR in your Excel it WILL be in the fetch list
+    import re as _re
+    _all_codes = set(ISSUERS.values())
+    _code_pat  = "|".join(sorted(_all_codes, key=len, reverse=True))
+    def _base_from_bbg(bbg):
+        m = _re.match(r"^(.+?)(" + _code_pat + r")\s+TB\s+Equity$", str(bbg).strip(), _re.IGNORECASE)
+        return m.group(1).upper() if m else None
+
+    _excel_bases = [
+        b for b in (
+            _base_from_bbg(r["BBG_Ticker"])
+            for _, r in st.session_state.df.iterrows()
+            if "TB Equity" in str(r.get("BBG_Ticker",""))
+        ) if b
+    ]
+
+    DR_UNIVERSE = sorted(set(_BASE_UNIVERSE + _excel_bases))
 
     st.markdown('<div class="section-header">CONTROLS</div>', unsafe_allow_html=True)
     ctrl1, ctrl2, ctrl3 = st.columns([3, 2, 2])
 
     with ctrl1:
-        st.caption(f"📡 Universe of {len(DR_UNIVERSE)} underlyings — fetch tries all; only ones with live SET data are shown.")
+        st.caption(f"📡 {len(DR_UNIVERSE)} underlyings ({len(_excel_bases)} from your Excel + hardcoded universe) — fetch tries all issuer×base combos.")
         extra_raw = st.text_input(
             "➕ Add extra underlyings not in the list (comma-separated)",
             key="mkt_extras", placeholder="e.g. TSMC, 2330, ARM…"
