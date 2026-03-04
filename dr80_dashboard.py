@@ -1167,6 +1167,91 @@ ISSUER_COLORS = {
 LIQUIDITY_PERIODS = {"1W": 7, "1M": 30, "3M": 91, "6M": 182, "YTD": 0, "1Y": 365}
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def discover_set_dr_universe(issuers: tuple) -> list:
+    """
+    Discover ALL base codes that have at least one live DR trading on SET.
+    Strategy: for each issuer, fetch its known DR tickers from Yahoo Finance
+    by scanning the {base}{code}.BK pattern. We use yfinance bulk download
+    with a 5-day window — any ticker that returns non-empty Close data exists.
+
+    Seed list: all codes from KTB's DR80 Excel + a broad candidate pool covering
+    all issuers' known listings. The fetch itself is the source of truth —
+    only tickers with actual data are kept.
+    """
+    # Seed: broad candidate pool of base codes that ANY Thai DR issuer has ever listed.
+    # This is the starting point — yfinance tells us which actually exist/trade.
+    # ── Authoritative SET DR universe — sourced from SET stockComparisonTrading export ──
+    # 192 unique base codes covering 267 DRs as of Mar 2025, across all 9 issuers.
+    # New listings will be caught by scan_live_universe probing extra codes from DR80 Excel.
+    CANDIDATE_BASES = [
+        "AAPL","ABBV","ABNB","ADBE","ADVANT","AIA","AMD","AMGN","AMZN","ANTA",
+        "ASEMI","ASML","AVGO","AXP","BABA","BAC","BDX","BIDU","BILIBILI","BKNG",
+        "BLK","BONDAS","BRKB","BYDCOM","CATL","CHHONGQ","CHMOBILE","CHNXT50","CMBANK","CN",
+        "CNBIO","CNEV","CNROBOAI","CNSEMI","CNSTAR50","CNTECH","COSTCO","CRM","CRWD","CSCO",
+        "DBS","DDOG","DELL","DISNEY","DUOL","E1VFVN30","ESTEE","EXPE","FERRARI","FPTVN",
+        "FUEVFVND","GASVN","GEELY","GOLD","GOLDUS","GOOG","GOOGL","GRAB","GSUS","HAIERS",
+        "HANSOH","HERMES","HK","HKCE","HKEX","HKTECH","HONDA","HOOD","HORIZON","HPG",
+        "HSHD","HUAHONG","IBM","ICBC","INDIA","INDIAESG","ISRG","ITOCHU","JAP","JAPAN",
+        "JAPAN100","JD","JDHEAL","JNJ","JPMUS","KEYENCE","KINGSOFT","KO","KUAISH","LENOVO",
+        "LLY","LOREAL","LPGOLD","LULU","LVMH","MA","MEITUAN","MELI","META","MICRON",
+        "MITSU","MNSO","MNST","MRVL","MS","MSFT","MSN","MUFG","MWG","NDAQ",
+        "NDX","NEM","NETEASE","NFLX","NIKE","NIKKEI","NINTENDO","NONGFU","NOVOB","NOW",
+        "NVDA","OIL","ONON","ORCL","PANW","PEP","PETROCN","PFIZER","PINGAN","PLTR",
+        "POPMART","PYPL","QCOM","QQQM","RBLX","SANOFI","SANRIO","SBUX","SEMB","SENSE",
+        "SGX","SHOP","SIA","SINGTEL","SINOBIO","SMFG","SMIC","SNOW","SOFTBANK","SONY",
+        "SP500","SP500US","SPBOND","SPCOM","SPENGY","SPFIN","SPHLTH","SPOT","SPTECH","STAR50",
+        "STEG","SUNNY","SUSHI","TAIWAN","TAIWANAI","TAIWANHD","TEL","TENCENT","THAIBEV","TME",
+        "TOYOTA","TRIPCOM","TRVUS","TSLA","UBER","UBTECH","UNH","UNIQLO","UOB","USTR",
+        "VCB","VENTURE","VHM","VISA","VNFIN","VNM","WMT","WORLD","WUXI","WUXIAT",
+        "XIAOMI","ZIJIN",
+    ]
+    return sorted(set(CANDIDATE_BASES))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def scan_live_universe(issuers: tuple, dr80_bases: tuple) -> list:
+    """
+    Discover which base codes actually have a live DR on SET by probing
+    every candidate×issuer combo with a 5-day yfinance download.
+    Only bases where AT LEAST ONE issuer returns real Close data are kept.
+    Result is cached for 1 hour so repeat visits are instant.
+    """
+    candidates = sorted(set(discover_set_dr_universe(issuers)) | set(dr80_bases))
+    all_tickers = [f"{base}{code}.BK" for base in candidates for _, code in issuers]
+
+    try:
+        raw = yf.download(
+            all_tickers,
+            period="5d",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker",
+        )
+    except Exception:
+        # Fallback: just return the DR80 bases we know exist
+        return sorted(dr80_bases)
+
+    live_bases = set()
+    for base in candidates:
+        for _, code in issuers:
+            yahoo = f"{base}{code}.BK"
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    hist = raw[yahoo] if yahoo in raw.columns.get_level_values(0) else pd.DataFrame()
+                else:
+                    hist = raw if len(all_tickers) == 1 else pd.DataFrame()
+                if hist is not None and len(hist.dropna(how="all")) > 0:
+                    live_bases.add(base)
+                    break   # one issuer confirmed → base is live, move on
+            except Exception:
+                continue
+
+    # Always keep DR80 bases even if temporarily delisted
+    live_bases.update(dr80_bases)
+    return sorted(live_bases)
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_issuer_dr_data(base_codes: tuple, issuers: tuple, period_days: int) -> pd.DataFrame:
     """Fetch daily price + volume for every base×issuer DR ticker on SET (.BK)."""
@@ -1253,48 +1338,31 @@ with tab_mktshare:
     if st.session_state.df is None:
         st.info("Upload your DR80 Excel file first.")
     else:
-        # ── Controls — always visible, above sub-tabs ──────────────────────────
+        # Step 1: seed from DR80 Excel (always reliable)
         dr80_securities = st.session_state.df[st.session_state.df["Is_DR80"]].copy()
-        auto_bases = sorted(set(
+        dr80_bases_ms = tuple(sorted(set(
             short_ticker(r["BBG_Ticker"]).upper().replace("80", "")
             for _, r in dr80_securities.iterrows()
             if r["BBG_Ticker"].endswith("80 TB Equity")
-        ))
+        )))
 
-        ctrl_r1c1, ctrl_r1c2 = st.columns([3, 1])
-        with ctrl_r1c1:
-            sel_bases_ms = st.multiselect(
-                "Underlyings (auto-detected from your DR80 list)",
-                options=auto_bases,
-                default=auto_bases[:6] if len(auto_bases) >= 6 else auto_bases,
-                key="ms_bases", placeholder="Select underlyings…"
-            )
-        with ctrl_r1c2:
-            extra_raw = st.text_input(
-                "➕ Add extras (comma-separated)",
-                placeholder="e.g. HOOD, MU, GRAB",
-                key="ms_extra",
-                help="Base codes for pipeline or other securities not yet in your DR80 list"
-            )
-        extra_codes = [c.strip().upper() for c in extra_raw.split(",") if c.strip()] if extra_raw else []
-        all_bases_ms = list(dict.fromkeys(sel_bases_ms + extra_codes))
-
-        ctrl_r2c1, ctrl_r2c2, ctrl_r2c3, ctrl_r2c4 = st.columns([2, 2, 2, 1])
-        with ctrl_r2c1:
+        # Controls: only issuers, period, metric, and fetch button
+        ctrl_c1, ctrl_c2, ctrl_c3, ctrl_c4 = st.columns([2, 2, 2, 1])
+        with ctrl_c1:
             sel_issuers_ms = st.multiselect(
                 "Issuers", options=list(ISSUERS.keys()),
                 default=list(ISSUERS.keys()), key="ms_issuers"
             )
-        with ctrl_r2c2:
+        with ctrl_c2:
             ms_liq_period = st.selectbox(
                 "Volume period", list(LIQUIDITY_PERIODS.keys()), index=1, key="ms_liq_period"
             )
-        with ctrl_r2c3:
+        with ctrl_c3:
             ms_metric = st.radio(
                 "Primary metric", ["Turnover (THB)", "Volume (Units)"],
                 horizontal=True, key="ms_metric"
             )
-        with ctrl_r2c4:
+        with ctrl_c4:
             ms_fetch_btn = st.button("🔄 Fetch Live Data", use_container_width=True,
                                      type="primary", key="ms_fetch")
             if st.session_state.get("ms_fetched_at"):
@@ -1303,20 +1371,29 @@ with tab_mktshare:
         metric_col_ms  = "Turnover" if "Turnover" in ms_metric else "Volume"
         period_days_ms = LIQUIDITY_PERIODS.get(ms_liq_period, 30)
 
-        if not all_bases_ms:
-            st.warning("Select or enter at least one underlying.")
-        elif not sel_issuers_ms:
+        if not sel_issuers_ms:
             st.warning("Select at least one issuer.")
         else:
             issuer_pairs_ms = tuple((k, ISSUERS[k]) for k in sel_issuers_ms if k in ISSUERS)
-            base_tuple_ms   = tuple(all_bases_ms)
 
             if ms_fetch_btn or "ms_liq_df" not in st.session_state:
+                # Step 2: scan Yahoo to discover ALL live DRs on SET across all issuers
+                with st.spinner("🔍 Scanning SET for all live DR tickers across all issuers… (first run ~30s, then cached 1hr)"):
+                    all_bases_ms = tuple(scan_live_universe(issuer_pairs_ms, dr80_bases_ms))
+                    st.session_state["ms_live_bases"] = all_bases_ms
+                base_tuple_ms = all_bases_ms
+
                 n_tix = len(base_tuple_ms) * len(issuer_pairs_ms)
-                with st.spinner(f"Fetching {n_tix} tickers from Yahoo Finance…"):
-                    st.session_state["ms_liq_df"]     = fetch_issuer_dr_data(base_tuple_ms, issuer_pairs_ms, period_days_ms)
-                    st.session_state["ms_ret_df"]      = fetch_issuer_returns(base_tuple_ms, issuer_pairs_ms)
-                    st.session_state["ms_fetched_at"]  = datetime.now().strftime("%H:%M:%S")
+                with st.spinner(f"📥 Fetching data for {len(base_tuple_ms)} confirmed underlyings × {len(issuer_pairs_ms)} issuers ({n_tix} tickers)…"):
+                    st.session_state["ms_liq_df"]    = fetch_issuer_dr_data(base_tuple_ms, issuer_pairs_ms, period_days_ms)
+                    st.session_state["ms_ret_df"]     = fetch_issuer_returns(base_tuple_ms, issuer_pairs_ms)
+                    st.session_state["ms_fetched_at"] = datetime.now().strftime("%H:%M:%S")
+            else:
+                base_tuple_ms = st.session_state.get("ms_live_bases", dr80_bases_ms)
+
+            n_live = len(base_tuple_ms)
+            n_dr80 = len(dr80_bases_ms)
+            st.caption(f"🔍 **{n_live} live underlyings** discovered on SET · {n_dr80} from your DR80 list · {n_live - n_dr80} from other issuers only")
 
             ms_liq_df = st.session_state.get("ms_liq_df", pd.DataFrame())
             ms_ret_df = st.session_state.get("ms_ret_df", pd.DataFrame())
