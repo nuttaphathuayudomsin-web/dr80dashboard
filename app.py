@@ -521,7 +521,7 @@ try:
 except ImportError:
     pass
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌐 Indices", "🏭 US Sectors", "🔍 Stock Screener", "📰 News", "🇹🇭 DR Tracker"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🌐 Indices", "🏭 US Sectors", "🔍 Stock Screener", "📰 News", "🇹🇭 DR Tracker", "📊 DR Benchmarking"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — INDICES
@@ -1069,23 +1069,92 @@ Table is created automatically on first load.
             st.warning(f"AI extraction failed: {e} — please fill in manually.")
             return None
 
-    # ── Upload widget ─────────────────────────────────────────────────────────
-    uploaded = st.file_uploader(
-        "📸 Upload SET DR page screenshot (PNG/JPG)",
-        type=["png", "jpg", "jpeg"],
-        help="Take a screenshot of set.or.th/th/market/product/dr/marketdata and upload here"
-    )
+    # ── Upload widget — Screenshot OR Excel ──────────────────────────────────
+    up_tab_ss, up_tab_xl = st.tabs(["📸 Screenshot (AI extract)", "📂 Excel Bulk Upload"])
 
-    # Pre-fill values from AI extraction or defaults
     prefill = {}
-    if uploaded is not None:
-        if not ANTHROPIC_API_KEY:
-            st.warning("⚠️ Add `ANTHROPIC_API_KEY` to Streamlit secrets to enable AI extraction. Fill in manually for now.")
-        else:
-            with st.spinner("🤖 Reading numbers from screenshot…"):
-                prefill = extract_from_screenshot(uploaded.read()) or {}
-            if prefill:
-                st.success("✅ AI extracted the numbers — review below and click Save.")
+
+    with up_tab_ss:
+        uploaded_img = st.file_uploader(
+            "Upload SET DR page screenshot (PNG/JPG)",
+            type=["png", "jpg", "jpeg"],
+            help="Screenshot of set.or.th/th/market/product/dr/marketdata — AI will read all numbers"
+        )
+        if uploaded_img is not None:
+            if not ANTHROPIC_API_KEY:
+                st.warning("⚠️ Add `ANTHROPIC_API_KEY` to Streamlit secrets to enable AI extraction.")
+            else:
+                with st.spinner("🤖 Reading numbers from screenshot…"):
+                    prefill = extract_from_screenshot(uploaded_img.read()) or {}
+                if prefill:
+                    st.success("✅ AI extracted the numbers — review the form below and click Save.")
+
+    with up_tab_xl:
+        st.markdown("**Upload Excel to bulk-add multiple days at once**")
+        st.caption("Columns required: `date, total_dr, ktb_dr, dr_vol, dr_val, ktb_vol, ktb_val, set_vol, set_val`")
+
+        # Download template button
+        template_df = pd.DataFrame([{
+            "date":"2025-01-01","total_dr":150,"ktb_dr":8,
+            "dr_vol":1000000,"dr_val":5000,"ktb_vol":50000,"ktb_val":250,
+            "set_vol":5000000000,"set_val":20000000
+        }])
+        st.download_button(
+            "⬇️ Download Excel Template",
+            data=template_df.to_csv(index=False).encode(),
+            file_name="dr_tracker_template.csv",
+            mime="text/csv"
+        )
+
+        uploaded_xl = st.file_uploader(
+            "Upload filled Excel/CSV",
+            type=["xlsx","xls","csv"],
+            key="xl_upload"
+        )
+        if uploaded_xl is not None:
+            try:
+                if uploaded_xl.name.endswith(".csv"):
+                    df_xl = pd.read_csv(uploaded_xl)
+                else:
+                    df_xl = pd.read_excel(uploaded_xl)
+
+                # Normalize column names
+                df_xl.columns = df_xl.columns.str.strip().str.lower().str.replace(" ","_")
+                required = ["date","total_dr","ktb_dr"]
+                missing = [c for c in required if c not in df_xl.columns]
+                if missing:
+                    st.error(f"Missing columns: {missing}")
+                else:
+                    st.markdown(f"**Preview — {len(df_xl)} rows:**")
+                    st.dataframe(df_xl.head(10), use_container_width=True)
+
+                    if st.button("💾 Import All Rows to Database", type="primary"):
+                        success, skipped = 0, 0
+                        for _, row in df_xl.iterrows():
+                            try:
+                                d = pd.to_datetime(row["date"]).strftime("%Y-%m-%d")
+                                ok = db_upsert({
+                                    "date":        d,
+                                    "week_label":  week_label(pd.to_datetime(row["date"]).to_pydatetime()),
+                                    "total_dr":    int(row.get("total_dr", 0)),
+                                    "ktb_dr":      int(row.get("ktb_dr", 0)),
+                                    "set_vol":     float(row.get("set_vol", 0)),
+                                    "set_val":     float(row.get("set_val", 0)),
+                                    "dr_vol":      float(row.get("dr_vol", 0)),
+                                    "dr_val":      float(row.get("dr_val", 0)),
+                                    "ktb_vol":     float(row.get("ktb_vol", 0)),
+                                    "ktb_val":     float(row.get("ktb_val", 0)),
+                                    "source":      "excel",
+                                    "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                })
+                                if ok: success += 1
+                                else:  skipped += 1
+                            except Exception:
+                                skipped += 1
+                        st.success(f"✅ Imported {success} rows · {skipped} skipped")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
 
     # ── Entry form (pre-filled if AI extracted) ───────────────────────────────
     with st.form("entry_form", clear_on_submit=True):
@@ -1229,3 +1298,441 @@ Table is created automatically on first load.
     st.divider()
     st.caption("📌 Data source: set.or.th/th/market/product/dr/marketdata — enter after 17:30 BKK each trading day")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — DR ISSUER BENCHMARKING
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Issuer registry ───────────────────────────────────────────────────────────
+DR_ISSUERS = {
+    "01": "Bualuang",
+    "03": "Pi",
+    "06": "KKP",
+    "11": "KBank",
+    "13": "KGI",
+    "19": "Yuanta",
+    "23": "InnovestX",
+    "24": "Finansia",
+    "80": "KTB",
+}
+
+# Top underlyings to scan — covers most active DRs on SET
+DR_UNDERLYINGS = [
+    "NVDA","AAPL","TSLA","META","MSFT","AMZN","GOOG","GOOGL","NFLX",
+    "AMD","AVGO","QCOM","ORCL","CRM","NOW","ADBE","PLTR","CRWD","PANW",
+    "MA","V","PYPL","BKNG","ABNB",
+    "JNJ","LLY","AMGN","ABBV","ISRG",
+    "SONY","NINTENDO","TOYOTA","SOFTBANK",
+    "BABA","JD","TENCENT","MEITUAN","XIAOMI",
+    "WMT","COSTCO","NKE","SBUX","KO","PEP",
+    "GS","MS","JPM","BAC","BLK",
+    "GOLD","NEM",
+    "DBS","UOB","GRAB",
+    "DELL","IBM","CSCO","MU","MRVL",
+]
+
+PERIODS = {"1D":"1d","5D":"5d","1M":"1mo","3M":"3mo","6M":"6mo","1Y":"1y","3Y":"3y","5Y":"5y"}
+
+@st.cache_data(ttl=300)
+def fetch_all_dr_prices(underlyings: tuple, issuers: tuple) -> pd.DataFrame:
+    """
+    Batch-download all {UNDERLYING}{CODE}.BK tickers.
+    Returns long-form DataFrame: Symbol, Underlying, Issuer, Price, Chg%, Volume, MktCap_proxy
+    """
+    tickers = []
+    for u in underlyings:
+        for code in issuers:
+            tickers.append(f"{u}{code}.BK")
+
+    try:
+        raw = yf.download(tickers, period="2d", interval="1d",
+                          auto_adjust=True, progress=False, threads=True)
+        if raw.empty:
+            return pd.DataFrame()
+
+        close = raw["Close"] if "Close" in raw.columns else raw.get("close", pd.DataFrame())
+        vol   = raw["Volume"] if "Volume" in raw.columns else raw.get("volume", pd.DataFrame())
+
+        rows = []
+        for sym in tickers:
+            try:
+                s_close = close[sym].dropna() if sym in close.columns else pd.Series(dtype=float)
+                s_vol   = vol[sym].dropna()   if sym in vol.columns   else pd.Series(dtype=float)
+                if len(s_close) == 0:
+                    continue
+                price   = float(s_close.iloc[-1])
+                prev    = float(s_close.iloc[-2]) if len(s_close) > 1 else price
+                volume  = int(s_vol.iloc[-1]) if len(s_vol) > 0 else 0
+                chg_pct = (price - prev) / prev * 100 if prev else 0
+                code    = sym.replace(".BK", "")[-2:]
+                underlying = sym.replace(".BK", "")[:-2]
+                issuer  = DR_ISSUERS.get(code, code)
+                rows.append({
+                    "Symbol":     sym,
+                    "Underlying": underlying,
+                    "Issuer":     issuer,
+                    "Code":       code,
+                    "Price":      round(price, 4),
+                    "Chg %":      round(chg_pct, 2),
+                    "Volume":     volume,
+                    "Value_proxy":round(price * volume / 1000, 2),  # '000 THB approx
+                })
+            except Exception:
+                continue
+        return pd.DataFrame(rows)
+    except Exception as e:
+        st.error(f"Fetch error: {e}")
+        return pd.DataFrame()
+
+
+# ── New DR discovery — scan broader underlying list for previously unseen symbols ──
+# Uses a wider candidate list beyond DR_UNDERLYINGS to catch newly listed DRs
+_DISCOVERY_CANDIDATES = [
+    # Extended list of potential new underlyings SET might list
+    "MSFT","INTC","TXN","NXPI","ON","ADI","MCHP","MPWR","SWKS","QRVO",
+    "SNOW","DDOG","CRWD","ZS","OKTA","HUBS","WDAY","TEAM","ATLASSIAN",
+    "SQ","PYPL","AFRM","SOFI","UPST","LC",
+    "SPOT","RBLX","U","DKNG","PENN","MGAM",
+    "RIVN","LCID","NIO","LI","XPEV","F","GM",
+    "BA","LMT","RTX","NOC","GD","HII",
+    "CVX","XOM","COP","SLB","HAL","BKR",
+    "BHP","RIO","FCX","AA","NUE","CLF",
+    "PFE","MRK","BMY","GILD","BIIB","REGN","VRTX",
+    "SYK","ZBH","EW","VAR","HOLX",
+    "HD","LOW","TGT","DG","DLTR","COST",
+    "DIS","CMCSA","T","VZ","TMUS",
+    "AMT","CCI","EQIX","PLD","SPG","O",
+    "GLD","SLV","USO","GDX","GDXJ",
+    "SPY","QQQ","IWM","DIA","VTI","VOO",
+    "VNM","MCHI","EWT","EWJ","EWY","EWA","EWG","EWU",
+    "GRAB","SEA","GOTO","BELI","ARTO",
+    "TCSG","OZON","SBER",
+    "VALE","PBR","ITUB","BBD",
+    "TCS","INFY","WIT","HDB","ICICIBC",
+    "TIGR","FUTU","LU","NOAH",
+]
+
+@st.cache_data(ttl=3600)  # check once per hour max
+def discover_new_drs(known_underlyings: tuple, issuers: tuple) -> list:
+    """
+    Scan candidate underlyings NOT in known list to find newly issued DRs.
+    Returns list of newly discovered symbols.
+    """
+    candidates = [u for u in _DISCOVERY_CANDIDATES if u not in known_underlyings]
+    if not candidates:
+        return []
+    test_tickers = [f"{u}{c}.BK" for u in candidates for c in issuers]
+    try:
+        raw = yf.download(test_tickers, period="5d", interval="1d",
+                          auto_adjust=True, progress=False, threads=True)
+        if raw.empty:
+            return []
+        close = raw["Close"] if "Close" in raw.columns else raw.get("close", pd.DataFrame())
+        new_found = []
+        for sym in test_tickers:
+            if sym in close.columns:
+                s = close[sym].dropna()
+                if len(s) > 0:
+                    new_found.append(sym)
+        return new_found
+    except Exception:
+        return []
+
+
+def fetch_period_returns(underlyings: tuple, issuers: tuple, period: str) -> pd.DataFrame:
+    """Fetch historical returns for heatmap — returns % change over period per issuer."""
+    tickers = [f"{u}{c}.BK" for u in underlyings for c in issuers]
+    try:
+        raw = yf.download(tickers, period=period, interval="1d",
+                          auto_adjust=True, progress=False, threads=True)
+        if raw.empty:
+            return pd.DataFrame()
+        close = raw["Close"] if "Close" in raw.columns else raw.get("close", pd.DataFrame())
+        rows = []
+        for sym in tickers:
+            try:
+                s = close[sym].dropna() if sym in close.columns else pd.Series(dtype=float)
+                if len(s) < 2:
+                    continue
+                ret = (s.iloc[-1] - s.iloc[0]) / s.iloc[0] * 100
+                code = sym.replace(".BK","")[-2:]
+                rows.append({
+                    "Underlying": sym.replace(".BK","")[:-2],
+                    "Issuer":     DR_ISSUERS.get(code, code),
+                    "Return %":   round(float(ret), 2),
+                })
+            except Exception:
+                continue
+        return pd.DataFrame(rows)
+    except Exception as e:
+        return pd.DataFrame()
+
+
+with tab6:
+    st.subheader("📊 DR Issuer Benchmarking — All Issuers vs All Underlyings")
+    st.caption("Live data from Yahoo Finance · Symbols: `{UNDERLYING}{CODE}.BK` · Cached 5 min")
+
+    # ── Controls ──────────────────────────────────────────────────────────────
+    ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 1])
+    with ctrl1:
+        selected_issuers = st.multiselect(
+            "Issuers to compare",
+            options=list(DR_ISSUERS.keys()),
+            default=list(DR_ISSUERS.keys()),
+            format_func=lambda c: f"{DR_ISSUERS[c]} ({c})"
+        )
+    with ctrl2:
+        selected_underlyings = st.multiselect(
+            "Filter underlyings (leave empty = all)",
+            options=DR_UNDERLYINGS,
+            default=[]
+        )
+    with ctrl3:
+        do_refresh = st.button("🔄 Refresh", use_container_width=True)
+        if do_refresh:
+            fetch_all_dr_prices.clear()
+            fetch_period_returns.clear()
+            discover_new_drs.clear()
+
+    underlyings_to_use = tuple(selected_underlyings) if selected_underlyings else tuple(DR_UNDERLYINGS)
+    issuers_to_use     = tuple(selected_issuers) if selected_issuers else tuple(DR_ISSUERS.keys())
+
+    if not issuers_to_use:
+        st.warning("Select at least one issuer.")
+        st.stop()
+
+    with st.spinner("Loading DR data from Yahoo Finance…"):
+        df_all = fetch_all_dr_prices(underlyings_to_use, issuers_to_use)
+
+    # ── New DR discovery alert ────────────────────────────────────────────────
+    with st.spinner("Scanning for newly listed DRs…"):
+        new_drs = discover_new_drs(underlyings_to_use, issuers_to_use)
+    if new_drs:
+        new_underlyings = sorted(set(s.replace(".BK","")[:-2] for s in new_drs))
+        st.warning(
+            f"🆕 **{len(new_drs)} newly listed DR(s) detected** not in your current tracking list!\n\n"
+            f"New underlyings: **{', '.join(new_underlyings)}**\n\n"
+            f"Full symbols: {', '.join(new_drs)}\n\n"
+            "Add these underlyings to `DR_UNDERLYINGS` in the app to include them in all analysis."
+        )
+
+    if df_all.empty:
+        st.warning("No data returned. Market may be closed or symbols not found.")
+    else:
+        st.caption(f"Found **{len(df_all)}** active DR symbols across **{df_all['Issuer'].nunique()}** issuers and **{df_all['Underlying'].nunique()}** underlyings.")
+
+        # ── SECTION 1: Market Share by Issuer ────────────────────────────────
+        st.divider()
+        st.markdown("### 🥧 Market Share by Issuer")
+
+        ms = (df_all.groupby("Issuer")
+                    .agg(Total_Volume=("Volume","sum"),
+                         Total_Value=("Value_proxy","sum"),
+                         DR_Count=("Symbol","count"))
+                    .reset_index()
+                    .sort_values("Total_Value", ascending=False))
+
+        ms["Vol Share %"]  = (ms["Total_Volume"] / ms["Total_Volume"].sum() * 100).round(2)
+        ms["Val Share %"]  = (ms["Total_Value"]  / ms["Total_Value"].sum()  * 100).round(2)
+
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            st.markdown("**By Value ('000 THB)**")
+            st.dataframe(
+                ms[["Issuer","DR_Count","Total_Value","Val Share %"]]
+                .rename(columns={"DR_Count":"# DRs","Total_Value":"Value ('000)","Val Share %":"Share %"})
+                .style.format({"Value ('000)":"{:,.0f}","Share %":"{:.2f}%"}),
+                use_container_width=True, hide_index=True
+            )
+        with mc2:
+            st.markdown("**By Volume (shares)**")
+            st.dataframe(
+                ms[["Issuer","Total_Volume","Vol Share %"]]
+                .rename(columns={"Total_Volume":"Volume","Vol Share %":"Share %"})
+                .style.format({"Volume":"{:,.0f}","Share %":"{:.2f}%"}),
+                use_container_width=True, hide_index=True
+            )
+
+        # ── SECTION 2: Heatmap — Returns by Issuer x Period ──────────────────
+        st.divider()
+        st.markdown("### 🌡️ Return Heatmap — Issuer × Time Period")
+
+        heatmap_periods = st.multiselect(
+            "Periods",
+            options=list(PERIODS.keys()),
+            default=["1D","5D","1M","3M","6M","1Y"],
+            key="heatmap_periods"
+        )
+
+        if heatmap_periods:
+            heatmap_rows = {}
+            progress = st.progress(0, text="Fetching period returns…")
+            for i, period_label in enumerate(heatmap_periods):
+                period_str = PERIODS[period_label]
+                df_ret = fetch_period_returns(underlyings_to_use, issuers_to_use, period_str)
+                if not df_ret.empty:
+                    # Average return per issuer for this period
+                    avg = df_ret.groupby("Issuer")["Return %"].mean().round(2)
+                    med = df_ret.groupby("Issuer")["Return %"].median().round(2)
+                    for issuer in avg.index:
+                        if issuer not in heatmap_rows:
+                            heatmap_rows[issuer] = {}
+                        heatmap_rows[issuer][f"{period_label} avg"] = avg[issuer]
+                        heatmap_rows[issuer][f"{period_label} med"] = med[issuer]
+                progress.progress((i+1)/len(heatmap_periods),
+                                  text=f"Fetched {period_label}…")
+            progress.empty()
+
+            if heatmap_rows:
+                hm_df = pd.DataFrame(heatmap_rows).T.reset_index().rename(columns={"index":"Issuer"})
+                # Color scale
+                num_cols = [c for c in hm_df.columns if c != "Issuer"]
+
+                def heat_color(val):
+                    if pd.isna(val):
+                        return ""
+                    if val > 15:   return "background-color:#0d4a1f; color:white"
+                    if val > 5:    return "background-color:#1a7a35; color:white"
+                    if val > 0:    return "background-color:#2ea84a; color:white"
+                    if val > -5:   return "background-color:#7a1a1a; color:white"
+                    if val > -15:  return "background-color:#b52020; color:white"
+                    return "background-color:#d73027; color:white"
+
+                fmt_dict = {c: lambda x: f"{x:+.1f}%" if pd.notna(x) else "—" for c in num_cols}
+                st.dataframe(
+                    hm_df.style
+                    .applymap(heat_color, subset=num_cols)
+                    .format(fmt_dict),
+                    use_container_width=True,
+                    height=min(80 + len(hm_df)*40, 500),
+                    hide_index=True
+                )
+
+        # ── SECTION 3: Side-by-side price for same underlying ─────────────────
+        st.divider()
+        st.markdown("### 🔍 Compare Issuers for Same Underlying")
+
+        available_underlyings = sorted(df_all["Underlying"].unique())
+        compare_ul = st.selectbox("Select underlying", available_underlyings,
+                                  index=available_underlyings.index("NVDA") if "NVDA" in available_underlyings else 0)
+
+        df_compare = df_all[df_all["Underlying"] == compare_ul].copy()
+        if df_compare.empty:
+            st.info(f"No data for {compare_ul} DRs.")
+        else:
+            # KPI cards per issuer
+            cols = st.columns(min(len(df_compare), 4))
+            for i, (_, row) in enumerate(df_compare.sort_values("Volume", ascending=False).iterrows()):
+                col = cols[i % len(cols)]
+                chg_color = "#3fb950" if row["Chg %"] > 0 else "#f85149"
+                col.markdown(f"""
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin:4px 0;text-align:center">
+                    <div style="font-size:13px;color:#8b949e">{row['Issuer']} ({row['Code']})</div>
+                    <div style="font-size:22px;font-weight:bold;color:#e6edf3">{row['Price']:.4f}</div>
+                    <div style="font-size:14px;color:{chg_color}">{row['Chg %']:+.2f}%</div>
+                    <div style="font-size:11px;color:#8b949e;margin-top:6px">Vol: {row['Volume']:,.0f}</div>
+                    <div style="font-size:11px;color:#8b949e">{row['Symbol']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Price spread table
+            st.markdown(f"**{compare_ul} DR — All Issuers**")
+            df_show = df_compare[["Symbol","Issuer","Price","Chg %","Volume","Value_proxy"]].sort_values("Volume", ascending=False)
+            st.dataframe(
+                df_show.style
+                .applymap(lambda v: f"color:{'#3fb950' if v>0 else '#f85149'}", subset=["Chg %"])
+                .format({"Price":"{:.4f}","Chg %":"{:+.2f}%","Volume":"{:,.0f}","Value_proxy":"{:,.0f}"}),
+                use_container_width=True, hide_index=True
+            )
+            # Price spread — cheapest vs most expensive
+            if len(df_compare) > 1:
+                spread = df_compare["Price"].max() - df_compare["Price"].min()
+                spread_pct = spread / df_compare["Price"].min() * 100
+                st.caption(f"Price spread: {spread:.4f} THB ({spread_pct:.2f}%) between cheapest and most expensive issuer")
+
+        # ── SECTION 4: Week-on-week market value change ───────────────────────
+        st.divider()
+        st.markdown("### 📅 Week-on-Week Market Value Change by Issuer")
+        st.caption("Compares current week total value vs prior week — proxy for AUM/market cap shift")
+
+        @st.cache_data(ttl=600)
+        def fetch_wow(underlyings: tuple, issuers: tuple) -> pd.DataFrame:
+            tickers = [f"{u}{c}.BK" for u in underlyings for c in issuers]
+            try:
+                raw = yf.download(tickers, period="14d", interval="1d",
+                                  auto_adjust=True, progress=False, threads=True)
+                if raw.empty:
+                    return pd.DataFrame()
+                close = raw["Close"] if "Close" in raw.columns else raw.get("close", pd.DataFrame())
+                vol   = raw["Volume"] if "Volume" in raw.columns else raw.get("volume", pd.DataFrame())
+                rows = []
+                for sym in tickers:
+                    try:
+                        s_c = close[sym].dropna() if sym in close.columns else pd.Series(dtype=float)
+                        s_v = vol[sym].dropna()   if sym in vol.columns   else pd.Series(dtype=float)
+                        if len(s_c) < 6:
+                            continue
+                        # value proxy = price * volume each day
+                        val = s_c * s_v / 1000
+                        this_week = val.iloc[-5:].sum()
+                        last_week = val.iloc[-10:-5].sum()
+                        wow = (this_week - last_week) / last_week * 100 if last_week else 0
+                        code = sym.replace(".BK","")[-2:]
+                        rows.append({
+                            "Issuer":     DR_ISSUERS.get(code, code),
+                            "Underlying": sym.replace(".BK","")[:-2],
+                            "This Week Value ('000)": round(this_week, 0),
+                            "Last Week Value ('000)": round(last_week, 0),
+                            "WoW Chg %":  round(wow, 2),
+                        })
+                    except Exception:
+                        continue
+                return pd.DataFrame(rows)
+            except Exception:
+                return pd.DataFrame()
+
+        df_wow = fetch_wow(underlyings_to_use, issuers_to_use)
+        if not df_wow.empty:
+            # Aggregate by issuer
+            wow_agg = (df_wow.groupby("Issuer")
+                            .agg(
+                                This_Week=("This Week Value ('000)","sum"),
+                                Last_Week=("Last Week Value ('000)","sum"),
+                            )
+                            .reset_index())
+            wow_agg["WoW Chg %"] = ((wow_agg["This_Week"] - wow_agg["Last_Week"])
+                                    / wow_agg["Last_Week"].replace(0, float("nan")) * 100).round(2)
+            wow_agg = wow_agg.sort_values("This_Week", ascending=False)
+
+            st.dataframe(
+                wow_agg.rename(columns={
+                    "This_Week":"This Week ('000 THB)",
+                    "Last_Week":"Last Week ('000 THB)"
+                }).style
+                .applymap(lambda v: f"color:{'#3fb950' if v>0 else '#f85149'}", subset=["WoW Chg %"])
+                .format({
+                    "This Week ('000 THB)": "{:,.0f}",
+                    "Last Week ('000 THB)": "{:,.0f}",
+                    "WoW Chg %": "{:+.2f}%"
+                }),
+                use_container_width=True, hide_index=True
+            )
+
+            # Underlying-level breakdown — top movers
+            st.markdown("**Top 10 Underlying-Level Movements (by absolute value change)**")
+            df_wow["Abs Chg"] = (df_wow["This Week Value ('000)"] - df_wow["Last Week Value ('000)"]).abs()
+            top10 = df_wow.nlargest(10, "Abs Chg")[
+                ["Issuer","Underlying","Last Week Value ('000)","This Week Value ('000)","WoW Chg %"]
+            ]
+            st.dataframe(
+                top10.style
+                .applymap(lambda v: f"color:{'#3fb950' if v>0 else '#f85149'}", subset=["WoW Chg %"])
+                .format({
+                    "Last Week Value ('000)": "{:,.0f}",
+                    "This Week Value ('000)": "{:,.0f}",
+                    "WoW Chg %": "{:+.2f}%"
+                }),
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.info("Not enough history to compute week-on-week change.")
+
+    st.caption("⚠️ Value proxy = price × volume / 1000. Not exact AUM. Data from Yahoo Finance, 15-min delayed.")
