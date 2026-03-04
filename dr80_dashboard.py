@@ -1282,46 +1282,70 @@ LIQUIDITY_PERIODS = {"1W": 7, "1M": 30, "3M": 91, "6M": 182, "YTD": 0, "1Y": 365
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_issuer_dr_data(base_codes: tuple, issuers: tuple, period_days: int) -> pd.DataFrame:
     """Fetch price + volume history for every base_code × issuer DR ticker on SET."""
-    today = datetime.today()
+    today    = datetime.today()
     start_dt = datetime(today.year, 1, 1) if period_days == 0 else today - timedelta(days=period_days + 5)
+    start_s  = start_dt.strftime("%Y-%m-%d")
+    end_s    = today.strftime("%Y-%m-%d")
+
     ticker_map = {f"{base}{code}.BK": (base, issuer, code)
                   for base in base_codes for issuer, code in issuers}
     if not ticker_map:
         return pd.DataFrame()
-    try:
-        raw = yf.download(list(ticker_map.keys()),
-                          start=start_dt.strftime("%Y-%m-%d"),
-                          end=today.strftime("%Y-%m-%d"),
-                          auto_adjust=True, progress=False, group_by="ticker")
-    except Exception:
-        return pd.DataFrame()
+
+    CHUNK = 100
+    hist_dict = {}  # yahoo -> DataFrame with Close/Volume
+    all_tickers = list(ticker_map.keys())
+    for i in range(0, len(all_tickers), CHUNK):
+        chunk = all_tickers[i:i + CHUNK]
+        try:
+            raw = yf.download(chunk, start=start_s, end=end_s,
+                              auto_adjust=True, progress=False, threads=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                for tkr in chunk:
+                    try:
+                        df_t = raw[tkr].dropna(subset=["Close"])
+                        if len(df_t) > 0:
+                            hist_dict[tkr] = df_t
+                    except Exception:
+                        continue
+            else:
+                # Single ticker
+                df_t = raw.dropna(subset=["Close"])
+                if len(df_t) > 0:
+                    hist_dict[chunk[0]] = df_t
+        except Exception:
+            continue
 
     rows = []
     for yahoo, (base, issuer, code) in ticker_map.items():
-        try:
-            hist = raw[yahoo] if (isinstance(raw.columns, pd.MultiIndex) and yahoo in raw.columns.get_level_values(0)) else (raw if len(ticker_map) == 1 else pd.DataFrame())
-            if hist is None or len(hist) == 0:
-                continue
-            hist = hist.dropna(subset=["Close"])
-            for date, row in hist.iterrows():
-                close = float(row["Close"]) if "Close" in row.index else None
-                vol   = float(row["Volume"]) if "Volume" in row.index else 0.0
-                rows.append({"Base": base, "Issuer": issuer, "IssuerCode": code,
-                              "Yahoo": yahoo, "Date": pd.Timestamp(date).date(),
-                              "Close": close, "Volume": vol,
-                              "Turnover": (close or 0) * vol})
-        except Exception:
+        hist = hist_dict.get(yahoo)
+        if hist is None or len(hist) == 0:
             continue
+        for date, row in hist.iterrows():
+            close = float(row["Close"]) if "Close" in row.index else None
+            vol   = float(row["Volume"]) if "Volume" in row.index else 0.0
+            rows.append({"Base": base, "Issuer": issuer, "IssuerCode": code,
+                          "Yahoo": yahoo, "Date": pd.Timestamp(date).date(),
+                          "Close": close, "Volume": vol,
+                          "Turnover": (close or 0) * vol})
     return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_issuer_returns(base_codes: tuple, issuers: tuple) -> pd.DataFrame:
     """Fetch WoW / MoM / YTD / 1Y returns for every base × issuer combination.
-    Uses individual Ticker.history() calls so Yahoo cannot silently drop tickers."""
-    today = datetime.today()
-    start_dt = (today - timedelta(days=375)).strftime("%Y-%m-%d")
-    end_dt   = today.strftime("%Y-%m-%d")
+    Downloads in chunks of 100 tickers to avoid Yahoo rate limits."""
+    today     = datetime.today()
+    start_dt  = (today - timedelta(days=375)).strftime("%Y-%m-%d")
+    end_dt    = today.strftime("%Y-%m-%d")
+
+    ticker_map = {f"{base}{code}.BK": (base, issuer)
+                  for base in base_codes for issuer, code in issuers}
+    all_tickers = list(ticker_map.keys())
+    if not all_tickers:
+        return pd.DataFrame()
 
     def pct(series, days):
         s = series.dropna()
@@ -1332,23 +1356,42 @@ def fetch_issuer_returns(base_codes: tuple, issuers: tuple) -> pd.DataFrame:
         sp, ep = float(s.iloc[idx]), float(s.iloc[-1])
         return round((ep / sp - 1) * 100, 2) if sp != 0 else None
 
-    rows = []
-    for base in base_codes:
-        for issuer, code in issuers:
-            yahoo = f"{base}{code}.BK"
-            try:
-                s = yf.Ticker(yahoo).history(start=start_dt, end=end_dt, auto_adjust=True)["Close"]
-                s = s.dropna()
-                if len(s) < 2:
-                    continue
-                rows.append({
-                    "Base": base, "Issuer": issuer, "Yahoo": yahoo,
-                    "WoW": pct(s, 7), "MoM": pct(s, 30),
-                    "YTD": pct(s, 0), "1Y":  pct(s, 365),
-                    "LastClose": float(s.iloc[-1])
-                })
-            except Exception:
+    # Batch download in chunks of 100 — keeps requests manageable
+    CHUNK = 100
+    prices_dict = {}  # yahoo -> pd.Series
+    for i in range(0, len(all_tickers), CHUNK):
+        chunk = all_tickers[i:i + CHUNK]
+        try:
+            raw = yf.download(chunk, start=start_dt, end=end_dt,
+                              auto_adjust=True, progress=False, threads=True)
+            if raw.empty:
                 continue
+            # Normalise to DataFrame of Close prices keyed by ticker
+            if isinstance(raw.columns, pd.MultiIndex):
+                close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else pd.DataFrame()
+            else:
+                # Single ticker returned as flat DataFrame
+                close = raw[["Close"]].rename(columns={"Close": chunk[0]}) if "Close" in raw.columns else pd.DataFrame()
+
+            for tkr in chunk:
+                if tkr in close.columns:
+                    s = close[tkr].dropna()
+                    if len(s) >= 2:
+                        prices_dict[tkr] = s
+        except Exception:
+            continue
+
+    rows = []
+    for yahoo, (base, issuer) in ticker_map.items():
+        s = prices_dict.get(yahoo)
+        if s is None or len(s) < 2:
+            continue
+        rows.append({
+            "Base": base, "Issuer": issuer, "Yahoo": yahoo,
+            "WoW": pct(s, 7), "MoM": pct(s, 30),
+            "YTD": pct(s, 0), "1Y":  pct(s, 365),
+            "LastClose": float(s.iloc[-1])
+        })
     return pd.DataFrame(rows)
 
 
