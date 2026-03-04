@@ -1284,8 +1284,8 @@ with tab_mktshare:
             default=list(ISSUERS.keys()),
             key="mkt_issuers", placeholder="Select issuers…"
         )
-        liq_period = st.selectbox("Volume period", list(LIQUIDITY_PERIODS.keys()),
-                                   index=1, key="liq_period")
+        liq_period = st.radio("Volume period", ["1W","1M","6M","YTD","1Y"],
+                               index=1, key="liq_period", horizontal=True)
 
     with ctrl3:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1453,15 +1453,53 @@ with tab_mktshare:
             with liq_t1:
                 st.markdown('<div class="section-header">MARKET SHARE BY ISSUER</div>', unsafe_allow_html=True)
 
-                by_issuer = (liq_df.groupby("Issuer")[metric_col]
-                             .agg(agg_fn).reset_index()
-                             .sort_values(metric_col, ascending=False))
-                total_vol  = by_issuer[metric_col].sum()
-                by_issuer["Share%"] = by_issuer[metric_col] / total_vol * 100 if total_vol > 0 else 0
-                ktb_share  = by_issuer[by_issuer["Issuer"]=="KTB"]["Share%"].sum()
+                # ── helper: compute share table for a given date-filtered slice ──
+                def _share_tbl(df_slice, col, fn):
+                    if df_slice is None or len(df_slice) == 0:
+                        return pd.DataFrame()
+                    t = (df_slice.groupby("Issuer")[col].agg(fn)
+                         .reset_index().sort_values(col, ascending=False))
+                    total = t[col].sum()
+                    t["Share%"] = t[col] / total * 100 if total > 0 else 0.0
+                    return t
+
+                today_ts   = pd.Timestamp.today().normalize()
+
+                def _slice(days):
+                    """Filter liq_df to last `days` calendar days (0 = YTD)."""
+                    df_d = liq_df.copy()
+                    df_d["Date"] = pd.to_datetime(df_d["Date"])
+                    if days == 0:
+                        cutoff = pd.Timestamp(today_ts.year, 1, 1)
+                    else:
+                        cutoff = today_ts - pd.Timedelta(days=days)
+                    return df_d[df_d["Date"] >= cutoff]
+
+                # Current period slice already applied via liq_df (fetched for liq_period)
+                by_issuer  = _share_tbl(liq_df, metric_col, agg_fn)
+                total_vol  = by_issuer[metric_col].sum() if len(by_issuer) else 0
+                ktb_share  = by_issuer[by_issuer["Issuer"]=="KTB"]["Share%"].sum() if len(by_issuer) else 0
                 top_issuer = by_issuer.iloc[0]["Issuer"] if len(by_issuer) else "—"
 
-                # KPI cards row
+                # WoW / MoM slices for delta cards
+                wow_cur  = _share_tbl(_slice(7),  metric_col, agg_fn)
+                wow_prev = _share_tbl(_slice(14), metric_col, agg_fn)   # prev 7d = 14d minus 7d
+                mom_cur  = _share_tbl(_slice(30), metric_col, agg_fn)
+                mom_prev = _share_tbl(_slice(60), metric_col, agg_fn)
+
+                def _share_for(tbl, issuer):
+                    if tbl is None or len(tbl) == 0:
+                        return 0.0
+                    row = tbl[tbl["Issuer"] == issuer]
+                    return float(row["Share%"].iloc[0]) if len(row) else 0.0
+
+                def _delta(cur_tbl, prev_tbl, issuer):
+                    """Delta = share in cur period minus share in prev period (both from start)."""
+                    c = _share_for(cur_tbl, issuer)
+                    p = _share_for(prev_tbl, issuer)
+                    return c - p   # positive = gaining share
+
+                # ── KPI cards row ──────────────────────────────────────────────
                 kc1, kc2, kc3, kc4 = st.columns(4)
                 def mcard(col, label, val, sub="", color="#94a3b8"):
                     col.markdown(f"""<div class="metric-card">
@@ -1469,7 +1507,7 @@ with tab_mktshare:
                         <div class="metric-value" style="color:{color}">{val}</div>
                         <div class="metric-sub">{sub}</div></div>""", unsafe_allow_html=True)
 
-                ktb_abs = by_issuer[by_issuer["Issuer"]=="KTB"][metric_col].sum()
+                ktb_abs  = by_issuer[by_issuer["Issuer"]=="KTB"][metric_col].sum() if len(by_issuer) else 0
                 n_active = liq_df[liq_df[metric_col]>0]["Yahoo"].nunique()
                 mcard(kc1, "KTB Market Share",  f"{ktb_share:.1f}%", f"{metric_col} ({liq_period})", "#3b82f6")
                 mcard(kc2, "Leader",             top_issuer, "by volume/turnover",
@@ -1478,10 +1516,11 @@ with tab_mktshare:
                 mcard(kc4, "Active Tickers",     str(n_active), "with any data", "#94a3b8")
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                ms_col1, ms_col2 = st.columns([1, 1])
 
-                with ms_col1:
-                    # Donut — KTB pulled out
+                # ── Donut + WoW/MoM change cards ──────────────────────────────
+                donut_col, cards_col = st.columns([1, 1])
+
+                with donut_col:
                     donut_colors = [ISSUER_COLORS.get(i, "#64748b") for i in by_issuer["Issuer"]]
                     fig_donut = go.Figure(go.Pie(
                         labels=by_issuer["Issuer"],
@@ -1502,40 +1541,192 @@ with tab_mktshare:
                     fig_donut.update_layout(
                         title=dict(text=f"Market Share — {metric_col} ({liq_period})",
                                    font=dict(family=C["font"],size=14,color="#64748b"), x=0),
-                        **base_layout(340, margin=dict(l=10,r=10,t=44,b=10)),
+                        **base_layout(360, margin=dict(l=10,r=10,t=44,b=10)),
                         showlegend=False,
                     )
                     st.plotly_chart(fig_donut, use_container_width=True)
 
-                with ms_col2:
-                    # Horizontal bar ranked by share
-                    by_iss_asc = by_issuer.sort_values("Share%")
-                    colors_bar = [ISSUER_COLORS.get(i, "#64748b") for i in by_iss_asc["Issuer"]]
-                    fig_ms = go.Figure(go.Bar(
-                        x=by_iss_asc["Share%"], y=by_iss_asc["Issuer"], orientation="h",
-                        marker_color=colors_bar, marker_line_width=0,
-                        text=[f"{v:.1f}%" for v in by_iss_asc["Share%"]],
-                        textposition="outside",
-                        textfont=dict(family=C["font"], size=12, color=C["text"]),
-                        hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
-                    ))
-                    fig_ms.update_layout(
-                        title=dict(text="Ranked Market Share %",
-                                   font=dict(family=C["font"],size=14,color="#64748b"), x=0),
-                        **base_layout(340, margin=dict(l=10,r=60,t=44,b=10)),
-                        xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", tickfont=dict(size=12)),
-                        yaxis=dict(showgrid=False, tickfont=dict(size=13), type="category"),
-                    )
-                    st.plotly_chart(fig_ms, use_container_width=True)
+                with cards_col:
+                    st.markdown('<div style="font-family:IBM Plex Mono;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;color:#3b82f6;border-bottom:1px solid #1e2d4a;padding-bottom:6px;margin-bottom:12px;">WOW / MOM SHARE CHANGE BY ISSUER</div>', unsafe_allow_html=True)
+                    issuers_ranked = by_issuer["Issuer"].tolist()
+                    card_rows = [issuers_ranked[i:i+2] for i in range(0, len(issuers_ranked), 2)]
+                    for pair in card_rows:
+                        pair_cols = st.columns(len(pair))
+                        for ci2, iss in enumerate(pair):
+                            iss_share = _share_for(by_issuer, iss)
+                            wow_d = _delta(wow_cur, wow_prev, iss)
+                            mom_d = _delta(mom_cur, mom_prev, iss)
+                            iss_color = ISSUER_COLORS.get(iss, "#64748b")
+                            wow_arrow = "▲" if wow_d > 0 else ("▼" if wow_d < 0 else "—")
+                            mom_arrow = "▲" if mom_d > 0 else ("▼" if mom_d < 0 else "—")
+                            wow_c = C["pos"] if wow_d > 0 else (C["neg"] if wow_d < 0 else "#64748b")
+                            mom_c = C["pos"] if mom_d > 0 else (C["neg"] if mom_d < 0 else "#64748b")
+                            pair_cols[ci2].markdown(f"""
+<div class="metric-card" style="padding:10px 14px;margin-bottom:6px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+    <span style="font-family:IBM Plex Mono;font-size:0.75rem;font-weight:600;color:{iss_color};">{iss}</span>
+    <span style="font-family:IBM Plex Mono;font-size:1.1rem;font-weight:600;color:#e2e8f0;">{iss_share:.1f}%</span>
+  </div>
+  <div style="display:flex;gap:14px;margin-top:4px;">
+    <span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#475569;">WoW&nbsp;
+      <span style="color:{wow_c};font-weight:600;">{wow_arrow}{abs(wow_d):.1f}pp</span>
+    </span>
+    <span style="font-family:IBM Plex Mono;font-size:0.72rem;color:#475569;">MoM&nbsp;
+      <span style="color:{mom_c};font-weight:600;">{mom_arrow}{abs(mom_d):.1f}pp</span>
+    </span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
-                # Ranked table
+                # ── Ranked bar chart ───────────────────────────────────────────
+                st.markdown("<br>", unsafe_allow_html=True)
+                by_iss_asc = by_issuer.sort_values("Share%")
+                colors_bar = [ISSUER_COLORS.get(i, "#64748b") for i in by_iss_asc["Issuer"]]
+                fig_ms = go.Figure(go.Bar(
+                    x=by_iss_asc["Share%"], y=by_iss_asc["Issuer"], orientation="h",
+                    marker_color=colors_bar, marker_line_width=0,
+                    text=[f"{v:.1f}%" for v in by_iss_asc["Share%"]],
+                    textposition="outside",
+                    textfont=dict(family=C["font"], size=12, color=C["text"]),
+                    hovertemplate="<b>%{y}</b><br>%{x:.1f}%<extra></extra>",
+                ))
+                fig_ms.update_layout(
+                    title=dict(text="Ranked Market Share %",
+                               font=dict(family=C["font"],size=14,color="#64748b"), x=0),
+                    **base_layout(300, margin=dict(l=10,r=60,t=44,b=10)),
+                    xaxis=dict(showgrid=True, gridcolor=C["grid"], ticksuffix="%", tickfont=dict(size=12)),
+                    yaxis=dict(showgrid=False, tickfont=dict(size=13), type="category"),
+                )
+                st.plotly_chart(fig_ms, use_container_width=True)
+
+                # ── Ranked table with WoW/MoM columns ─────────────────────────
                 rank_tbl = by_issuer.sort_values("Share%", ascending=False).reset_index(drop=True)
                 rank_tbl.index += 1; rank_tbl.index.name = "Rank"
                 rank_tbl[m_label] = rank_tbl[metric_col].apply(fmt_vol)
-                rank_tbl["Share%"] = rank_tbl["Share%"].apply(lambda v: f"{v:.1f}%")
-                st.dataframe(rank_tbl[["Issuer", m_label, "Share%"]].style
-                             .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
-                             use_container_width=True, height=320)
+                rank_tbl["Share%_disp"] = rank_tbl["Share%"].apply(lambda v: f"{v:.1f}%")
+                rank_tbl["WoW Δ (pp)"] = rank_tbl["Issuer"].apply(lambda iss: round(_delta(wow_cur, wow_prev, iss), 2))
+                rank_tbl["MoM Δ (pp)"] = rank_tbl["Issuer"].apply(lambda iss: round(_delta(mom_cur, mom_prev, iss), 2))
+                rank_show = rank_tbl[["Issuer", m_label, "Share%_disp", "WoW Δ (pp)", "MoM Δ (pp)"]].rename(columns={"Share%_disp": "Share%"})
+
+                def _pp_color(v):
+                    if pd.isna(v): return ""
+                    return f"color:{C['pos']}" if v > 0 else (f"color:{C['neg']}" if v < 0 else "")
+
+                st.dataframe(
+                    rank_show.style
+                        .applymap(_pp_color, subset=["WoW Δ (pp)", "MoM Δ (pp)"])
+                        .format({"WoW Δ (pp)": lambda v: f"{v:+.2f}pp", "MoM Δ (pp)": lambda v: f"{v:+.2f}pp"})
+                        .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                    use_container_width=True, height=320
+                )
+
+                # ── Issuer drill-down: top 5 underlyings ──────────────────────
+                st.markdown('<div class="section-header">ISSUER DRILL-DOWN — TOP UNDERLYINGS</div>', unsafe_allow_html=True)
+                drill_issuers = by_issuer["Issuer"].tolist()
+                sel_drill = st.selectbox(
+                    "Select issuer to drill down",
+                    options=drill_issuers,
+                    index=0,
+                    key="drill_issuer",
+                    format_func=lambda x: f"{x}  ({_share_for(by_issuer, x):.1f}% share)"
+                )
+
+                drill_df = liq_df[liq_df["Issuer"] == sel_drill].copy()
+                if len(drill_df) == 0:
+                    st.info(f"No data for {sel_drill} in current period.")
+                else:
+                    top_tv = (drill_df.groupby("Base")["Turnover"].agg(agg_fn)
+                              .reset_index().sort_values("Turnover", ascending=False).head(5))
+                    top_vol = (drill_df.groupby("Base")["Volume"].agg(agg_fn)
+                               .reset_index().sort_values("Volume", ascending=False).head(5))
+
+                    iss_color = ISSUER_COLORS.get(sel_drill, "#64748b")
+                    drill_c1, drill_c2 = st.columns(2)
+
+                    with drill_c1:
+                        st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:{iss_color};text-transform:uppercase;margin-bottom:8px;">{sel_drill} — Top 5 by Turnover (THB)</div>', unsafe_allow_html=True)
+                        fig_dt = go.Figure(go.Bar(
+                            x=top_tv["Turnover"],
+                            y=top_tv["Base"],
+                            orientation="h",
+                            marker_color=iss_color,
+                            marker_line_width=0,
+                            text=[fmt_vol(v) for v in top_tv["Turnover"]],
+                            textposition="outside",
+                            textfont=dict(family=C["font"], size=12, color=C["text"]),
+                            hovertemplate="<b>%{y}</b><br>%{x:,.0f}<extra></extra>",
+                        ))
+                        fig_dt.update_layout(
+                            **base_layout(260, margin=dict(l=10,r=60,t=20,b=10)),
+                            xaxis=dict(showgrid=True, gridcolor=C["grid"], tickfont=dict(size=11)),
+                            yaxis=dict(showgrid=False, tickfont=dict(size=13), autorange="reversed"),
+                        )
+                        st.plotly_chart(fig_dt, use_container_width=True)
+
+                    with drill_c2:
+                        st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:{iss_color};text-transform:uppercase;margin-bottom:8px;">{sel_drill} — Top 5 by Volume (Units)</div>', unsafe_allow_html=True)
+                        fig_dv = go.Figure(go.Bar(
+                            x=top_vol["Volume"],
+                            y=top_vol["Base"],
+                            orientation="h",
+                            marker_color=iss_color,
+                            marker_line_width=0,
+                            text=[fmt_vol(v) for v in top_vol["Volume"]],
+                            textposition="outside",
+                            textfont=dict(family=C["font"], size=12, color=C["text"]),
+                            hovertemplate="<b>%{y}</b><br>%{x:,.0f}<extra></extra>",
+                        ))
+                        fig_dv.update_layout(
+                            **base_layout(260, margin=dict(l=10,r=60,t=20,b=10)),
+                            xaxis=dict(showgrid=True, gridcolor=C["grid"], tickfont=dict(size=11)),
+                            yaxis=dict(showgrid=False, tickfont=dict(size=13), autorange="reversed"),
+                        )
+                        st.plotly_chart(fig_dv, use_container_width=True)
+
+                    # WoW / MoM drill breakdown for this issuer
+                    st.markdown(f'<div style="font-family:IBM Plex Mono;font-size:0.7rem;color:#475569;text-transform:uppercase;margin:10px 0 8px;">WoW / MoM underlying breakdown for {sel_drill}</div>', unsafe_allow_html=True)
+                    def _drill_period(days, issuer):
+                        s = _slice(days)
+                        if len(s) == 0: return pd.DataFrame()
+                        return (s[s["Issuer"]==issuer].groupby("Base")[metric_col]
+                                .agg(agg_fn).reset_index().rename(columns={metric_col: f"_{days}"}))
+
+                    d7  = _drill_period(7,  sel_drill)
+                    d14 = _drill_period(14, sel_drill)
+                    d30 = _drill_period(30, sel_drill)
+                    d60 = _drill_period(60, sel_drill)
+
+                    if len(d7) and len(d14):
+                        merged = d7.merge(d14, on="Base", how="outer").fillna(0)
+                        # prev 7d = 14d total - 7d total (approximate)
+                        merged["WoW Δ"] = merged["_7"] - (merged["_14"] - merged["_7"])
+                        merged["WoW Δ%"] = ((merged["_7"] / (merged["_14"] - merged["_7"]).replace(0, np.nan)) - 1) * 100
+                        if len(d30) and len(d60):
+                            d30r = d30.rename(columns={"_30":"_30"}) if "_30" in d30.columns else d30.rename(columns={d30.columns[-1]:"_30"})
+                            d60r = d60.rename(columns={d60.columns[-1]:"_60"})
+                            merged = merged.merge(d30r, on="Base", how="outer").merge(d60r, on="Base", how="outer").fillna(0)
+                            merged["MoM Δ"] = merged.get("_30", 0) - (merged.get("_60", 0) - merged.get("_30", 0))
+                        merged = merged.sort_values("_7", ascending=False).head(10)
+                        merged["Underlying"] = merged["Base"]
+                        merged[f"This Week ({metric_col})"] = merged["_7"].apply(fmt_vol)
+                        merged["WoW Change"] = merged["WoW Δ"].apply(lambda v: f"{v:+,.0f}")
+                        merged["WoW %"] = merged["WoW Δ%"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) and not np.isinf(v) else "—")
+                        disp_cols = ["Underlying", f"This Week ({metric_col})", "WoW Change", "WoW %"]
+                        if "MoM Δ" in merged.columns:
+                            merged["MoM Change"] = merged["MoM Δ"].apply(lambda v: f"{v:+,.0f}")
+                            disp_cols.append("MoM Change")
+
+                        def _wow_color(v):
+                            try:
+                                num = float(str(v).replace("%","").replace("+","").replace(",",""))
+                                return f"color:{C['pos']}" if num > 0 else (f"color:{C['neg']}" if num < 0 else "")
+                            except: return ""
+
+                        st.dataframe(
+                            merged[disp_cols].style
+                                .applymap(_wow_color, subset=["WoW Change","WoW %"] + (["MoM Change"] if "MoM Change" in merged.columns else []))
+                                .set_properties(**{"font-family":"IBM Plex Mono","font-size":"12px"}),
+                            use_container_width=True, height=340
+                        )
 
                 # ── Per-underlying market share heatmap ────────────────────────
                 st.markdown('<div class="section-header">MARKET SHARE BY UNDERLYING × ISSUER</div>', unsafe_allow_html=True)
