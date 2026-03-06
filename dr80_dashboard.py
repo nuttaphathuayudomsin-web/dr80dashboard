@@ -1410,10 +1410,12 @@ with tab_mktshare:
     period_days  = LIQUIDITY_PERIODS[liq_period_fetch]
 
     if fetch_live or "mkt_returns_df" not in st.session_state:
-        with st.spinner(f"Fetching {len(base_tuple) * len(issuer_pairs)} tickers from Yahoo Finance…"):
-            st.session_state["mkt_liq_df"]    = fetch_issuer_dr_data(base_tuple, issuer_pairs, period_days)
-            st.session_state["mkt_returns_df"] = fetch_issuer_returns(base_tuple, issuer_pairs)
-            st.session_state["mkt_last_fetch"] = datetime.now().strftime("%H:%M:%S")
+        _fetch_msg = st.empty()
+        _fetch_msg.info(f"⏳ Fetching {len(base_tuple) * len(issuer_pairs)} tickers from Yahoo Finance…")
+        st.session_state["mkt_liq_df"]    = fetch_issuer_dr_data(base_tuple, issuer_pairs, period_days)
+        st.session_state["mkt_returns_df"] = fetch_issuer_returns(base_tuple, issuer_pairs)
+        st.session_state["mkt_last_fetch"] = datetime.now().strftime("%H:%M:%S")
+        _fetch_msg.empty()
 
     liq_df_raw = st.session_state.get("mkt_liq_df", pd.DataFrame())
     ret_df     = st.session_state.get("mkt_returns_df", pd.DataFrame())
@@ -2242,8 +2244,10 @@ with tab_add:
                            "Sector":sec_in,"Quarter":q_in,"Is_DR80":False,**{p:None for p in PERIODS}}
                 if fetch_on:
                     if yahoo:
-                        with st.spinner(f"Fetching {yahoo}…"):
-                            rets = fetch_single(yahoo)
+                        _s = st.empty()
+                        _s.caption(f"⏳ Fetching {yahoo}…")
+                        rets = fetch_single(yahoo)
+                        _s.empty()
                         new_row.update(rets)
                         st.success(f"✓ Fetched data for {yahoo}")
                     else:
@@ -2275,8 +2279,7 @@ with tab_add:
     st.caption("Downloads updated Excel preserving original structure with refreshed returns and new pipeline entries.")
     if st.session_state.excel_bytes and st.session_state.df is not None:
         if st.button("Generate Updated Excel"):
-            with st.spinner("Writing Excel…"):
-                xl = write_excel(st.session_state.excel_bytes, st.session_state.df)
+            xl = write_excel(st.session_state.excel_bytes, st.session_state.df)
             st.download_button("⬇ Download Updated DR80_Tracking.xlsx", data=xl,
                                file_name=f"DR80_Tracking_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
