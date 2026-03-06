@@ -201,14 +201,16 @@ def fetch_returns_yahoo(tickers: list) -> dict:
     if not valid:
         return {}
 
-    progress = st.progress(0, text="Connecting to Yahoo Finance...")
+    _status = st.empty()
+    _status.caption("⏳ Connecting to Yahoo Finance...")
     try:
         raw = yf.download(valid, start=start, end=today.strftime("%Y-%m-%d"),
                           auto_adjust=True, progress=False)
         prices = raw["Close"] if "Close" in raw.columns else raw
+        _status.empty()
     except Exception as e:
         st.error(f"Download failed: {e}")
-        progress.empty()
+        _status.empty()
         return {}
 
     def pct_chg(series, from_dt):
@@ -231,14 +233,14 @@ def fetch_returns_yahoo(tickers: list) -> dict:
 
     results = {}
     for i, ticker in enumerate(valid):
-        progress.progress((i + 1) / len(valid), text=f"Processing {ticker}…")
+        _status.caption(f"⏳ Processing {ticker} ({i+1}/{len(valid)})…")
         try:
             s = prices[ticker] if (isinstance(prices, pd.DataFrame) and ticker in prices.columns) else prices
             results[ticker] = {p: pct_chg(s, dt) for p, dt in period_offsets.items()}
         except Exception:
             results[ticker] = {p: None for p in PERIODS}
 
-    progress.empty()
+    _status.empty()
     return results
 
 
