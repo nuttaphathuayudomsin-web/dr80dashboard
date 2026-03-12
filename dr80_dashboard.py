@@ -74,7 +74,10 @@ def bbg_to_yahoo(bbg: str):
         except ValueError:
             return f"{code}.HK"
     if exch == "JP":
-        return f"{code}.T"
+        try:
+            return f"{int(code):04d}.T"
+        except ValueError:
+            return f"{code}.T"
     if exch == "CH":
         try:
             int(code)
@@ -117,41 +120,172 @@ def display_label(bbg: str, name: str, max_len: int = 15) -> str:
 
 
 # ── Excel parsing ──────────────────────────────────────────────────────────────
+
+# Main sector names as they appear in col B of the new Excel format
+_MAIN_SECTORS = {
+    "Semiconductor/ AI", "Techonology", "Precious metals", "Precious Metal",
+    "Energy", "Consumer discretionary", "Consumer defensive",
+    "Defense", "ETF",
+}
+
+# Sub-sector labels (appear between a main sector row and its securities) →
+# mapped to their parent main sector so analytics group correctly.
+_SUBSECTOR_TO_SECTOR: dict[str, str] = {
+    # Semiconductor / AI sub-groups
+    "Hyperscaler":                          "Semiconductor/ AI",
+    "Upstream - Machines":                  "Semiconductor/ AI",
+    "Chip designer":                        "Semiconductor/ AI",
+    "Memory":                               "Semiconductor/ AI",
+    "PCB":                                  "Semiconductor/ AI",
+    "Datacenters - Optoelectronics":        "Semiconductor/ AI",
+    "Datacenters - Networking equipments":  "Semiconductor/ AI",
+    "Chip designers":                       "Semiconductor/ AI",
+    "Upstream":                             "Semiconductor/ AI",
+}
+
+def _reconstruct_ticker(c0, c1_str: str) -> str | None:
+    """
+    Reconstruct a full BBG ticker from a CONCATENATE formula row.
+    c0 = raw code (int, float, or str from col A)
+    c1_str = formula string like '=CONCATENATE(A17," JP Equity")'
+    Returns e.g. '8035 JP Equity', 'LRCX US Equity', '002371 CH Equity'
+    """
+    import re as _re
+    m = _re.search(r'"( \w+ Equity)"', c1_str)
+    if not m:
+        return None
+    suffix = m.group(1)          # e.g. ' JP Equity'
+    code = str(c0).strip()
+    # Normalise numeric codes: int floats like 8035.0 → '8035'
+    if code.endswith(".0"):
+        code = code[:-2]
+    return f"{code}{suffix}"
+
+
 @st.cache_data(show_spinner=False)
 def _parse_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Parse a DR80-structured sheet (sector headers + ticker rows) into a DataFrame."""
+    """
+    Parse a DR80-structured sheet into a DataFrame.
+
+    Handles both the legacy format (old Excel) and the new Bloomberg BQL format
+    where:
+      - Col A: numeric/alpha code (or None for DR80 rows)
+      - Col B: full BBG ticker (TB Equity), CONCATENATE formula, sector name, or sub-sector header
+      - Col C: company name (or BQL formula for first row of each BQL group)
+      - Col D: quarter (pipeline only)
+      - Col E–K: period returns (numeric for real data; BQL formula for first-row anchors)
+    """
+    import re as _re
     records = []
     current_sector = "Unknown"
+
     for _, row in df_raw.iterrows():
-        c0 = row[0]
-        c1 = str(row[1]) if pd.notna(row[1]) else ""
-        c2 = str(row[2]) if pd.notna(row[2]) else ""
-        c3 = str(row[3]) if pd.notna(row[3]) else ""
-        if pd.isna(c0) and c2 == "name" and c1 not in ["", "nan"]:
-            current_sector = c1.strip()
+        c0     = row[0]
+        c1_raw = row[1]
+        c2_raw = row[2]
+        c3_raw = row[3]
+
+        c1 = str(c1_raw).strip() if pd.notna(c1_raw) else ""
+        c2 = str(c2_raw).strip() if pd.notna(c2_raw) else ""
+        c3 = str(c3_raw).strip() if pd.notna(c3_raw) else ""
+
+        # ── Skip completely empty rows ──────────────────────────────────────
+        _c0_empty = (c0 is None) or (not isinstance(c0, str) and pd.isna(c0))
+        if not c1 and not c2 and _c0_empty:
             continue
-        if c1 in ["", "nan"] or c2 in ["", "nan", "id", "name"] or c1.startswith("Unnamed"):
+
+        # ── Detect main SECTOR header rows ─────────────────────────────────
+        if _c0_empty and c1 in _MAIN_SECTORS:
+            current_sector = c1
             continue
+        # ── Detect sub-sector rows — map to parent sector ───────────────────
+        if _c0_empty and c1 in _SUBSECTOR_TO_SECTOR:
+            current_sector = _SUBSECTOR_TO_SECTOR[c1]
+            continue
+        # Legacy sector detection (col C == "name", col A empty, not a sub-sector)
+        if _c0_empty and c2 == "name" and c1 not in ["", "nan"]:
+            current_sector = c1
+            continue
+
+        # ── Skip header/label rows ──────────────────────────────────────────
+        if c2 in ("id", "name") or c1 in ("Unnamed",) or c1.startswith("Unnamed:"):
+            continue
+
+        # ── Skip sub-sector header rows (col C starts with BQL formula) ────
+        # e.g. Row 5: col B='Hyperscaler', col C='=_xll.BQL(...)'
+        if c2.startswith("=_xll.BQL"):
+            continue
+
+        # ── Determine BBG ticker ────────────────────────────────────────────
+        bbg_ticker = None
+
+        if c1.startswith("=CONCATENATE"):
+            # New-format pipeline row: reconstruct ticker from col A + formula suffix
+            bbg_ticker = _reconstruct_ticker(c0, c1)
+        elif c1.endswith("TB Equity") or " US Equity" in c1 or " HK Equity" in c1 \
+                or " JP Equity" in c1 or " CH Equity" in c1 or " SP Equity" in c1 \
+                or " LN Equity" in c1 or " GR Equity" in c1:
+            # Plain full BBG ticker in col B
+            bbg_ticker = c1
+        else:
+            # Not a recognisable ticker row — skip
+            continue
+
+        if not bbg_ticker:
+            continue
+
+        # ── Determine company name ──────────────────────────────────────────
+        # col C holds the name for most rows; skip if it looks like a BQL formula
+        name = ""
+        if c2 and not c2.startswith("="):
+            name = c2
+        # For BQL anchor rows (first row of a BQL group) c2 is a formula → name = ""
+        # We still want the row if return data is numeric in cols E–K
+
+        # ── Extract period returns ──────────────────────────────────────────
         perf = {}
+        has_numeric = False
         for j, p in enumerate(PERIODS):
-            v = row[4 + j] if (4 + j) < len(row) else None
-            perf[p] = float(v) if pd.notna(v) else None
+            col_idx = 4 + j
+            v = row[col_idx] if col_idx < len(row) else None
+            if v is not None and not isinstance(v, str) and pd.notna(v):
+                perf[p] = float(v)
+                has_numeric = True
+            else:
+                perf[p] = None
+
+        # Skip rows where ALL return cells are BQL formulas (first anchor row of a group)
+        # and name is empty — these are pure formula rows with no real data here
+        if not has_numeric and not name:
+            continue
+
+        # ── Quarter ─────────────────────────────────────────────────────────
+        quarter = c3 if c3 not in ("nan", "", "name") else None
+
+        # ── Is this a DR80 (issued) or pipeline security? ───────────────────
+        is_dr80 = bbg_ticker.endswith("80 TB Equity")
+
         records.append({
-            "BBG_Ticker": c1.strip(),
-            "Yahoo_Ticker": bbg_to_yahoo(c1.strip()),
-            "Name": c2.strip(),
-            "Sector": current_sector,
-            "Quarter": c3.strip() if c3 not in ["nan", ""] else None,
-            "Is_DR80": c1.strip().endswith("80 TB Equity"),
+            "BBG_Ticker":   bbg_ticker,
+            "Yahoo_Ticker": bbg_to_yahoo(bbg_ticker),
+            "Name":         name,
+            "Sector":       current_sector,
+            "Quarter":      quarter,
+            "Is_DR80":      is_dr80,
             **perf,
         })
+
     return pd.DataFrame(records)
 
 
 @st.cache_data(show_spinner=False)
 def parse_excel(file_bytes: bytes) -> pd.DataFrame:
-    df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Current DR80", header=None)
-    return _parse_sheet(df_raw)
+    xl = pd.ExcelFile(io.BytesIO(file_bytes))
+    # Accept either sheet name variant
+    sheet = "Current DR80" if "Current DR80" in xl.sheet_names else xl.sheet_names[0]
+    df_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
+    df = _parse_sheet(df_raw)
+    return df
 
 
 @st.cache_data(show_spinner=False)
